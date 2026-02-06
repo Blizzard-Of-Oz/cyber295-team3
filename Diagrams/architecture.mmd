@@ -8,7 +8,7 @@ architecture-beta
   group g_entraid [Azure]
   group g_llms(internet)[LLMs]
   group g_mcp[System Backend]
-  group g_db[Database]
+  group g_db[Audit Log]
   group g_ext(internet)[External Services]
 
   service web(server)[Web UI] in g_ui
@@ -18,7 +18,7 @@ architecture-beta
   service http_wrapper(server)[HTTP Wrapper] in g_mcp
   service mcp(server)[GongRzhe Gmail MCP Server] in g_mcp
   service extsvc(cloud)[Gmail API] in g_ext
-  service auditlog(database)[AuditLog] in g_db
+  service auditlog(database)[ImmuDB] in g_db
 
   web:L --> R:entraid
   web:T --> B:agent
