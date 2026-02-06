@@ -18,7 +18,7 @@ architecture-beta
   service http_wrapper(server)[HTTP Wrapper] in g_mcp
   service mcp(server)[GongRzhe Gmail MCP Server] in g_mcp
   service extsvc(cloud)[Gmail API] in g_ext
-  service auditlog(database) in g_db
+  service auditlog(database)[AuditLog] in g_db
 
   web:L --> R:entraid
   web:T --> B:agent
