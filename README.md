@@ -5,7 +5,7 @@
 This project is an AI-powered bot designed to help manage a Gmail mailbox.
 
 It is built on top of the **Gmail MCP Server**:  
-https://github.com/GongRzhe/Gmail-MCP-Server/issues
+https://github.com/GongRzhe/Gmail-MCP-Server
 
 ### Architecture Overview
 
