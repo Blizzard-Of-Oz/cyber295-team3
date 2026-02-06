@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Entra ID Audit Log Viewer</title>
+  <link rel="stylesheet" href="style.css?v=20260130-2" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Entra ID Audit Log Viewer</h1>
+      <p>Real-time audit trail of all user enable/disable actions</p>
+    </header>
+
+    <div class="status-bar">
+      <span id="status-indicator" class="status disconnected">●</span>
+      <span id="status-text">Loading...</span>
+      <span id="db-status" class="status-pill loading">immuDB: checking...</span>
+      <span id="last-updated" class="status-meta">Last update: --</span>
+      <button id="refresh-btn" class="btn btn-primary">Refresh</button>
+      <label class="auto-refresh-toggle">
+        <input type="checkbox" id="auto-refresh-toggle" />
+        <span>Auto-refresh (off)</span>
+      </label>
+    </div>
+
+    <div id="db-banner" class="banner hidden">
+      immuDB is not connected yet. The viewer will retry automatically.
+    </div>
+
+    <div class="controls">
+      <input
+        type="text"
+        id="search-box"
+        placeholder="Search by user, authenticated user, IP, or action..."
+        class="search-input"
+      />
+      <select id="filter-action" class="filter-select">
+        <option value="">All Actions</option>
+        <option value="enable">Enable</option>
+        <option value="disable">Disable</option>
+      </select>
+      <select id="filter-source" class="filter-select">
+        <option value="">All Sources</option>
+        <option value="kv">KV Store</option>
+        <option value="sql">SQL Table</option>
+      </select>
+    </div>
+
+    <div class="table-wrapper">
+      <table id="logs-table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Action</th>
+            <th>Target User</th>
+            <th>Authenticated User</th>
+            <th>Requester IP</th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody id="logs-tbody">
+          <tr>
+            <td colspan="6" class="loading">Loading audit logs...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="footer">
+      <p id="log-count">Showing 0 entries</p>
+    </div>
+  </div>
+
+  <script src="script.js?v=20260130-2"></script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+:root {
+  color-scheme: light;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  background: #f7f8fb;
+  color: #1b1e28;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.app {
+  max-width: 960px;
+  margin: 40px auto;
+  padding: 0 20px 60px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+header h1 {
+  margin: 0 0 8px;
+  font-size: 32px;
+}
+
+header p {
+  margin: 0;
+  color: #5b6270;
+}
+
+.card {
+  background: #fff;
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  margin-bottom: 18px;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 140px;
+  border-radius: 10px;
+  border: 1px solid #d8dee9;
+  padding: 12px;
+  font-size: 14px;
+  resize: vertical;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+button {
+  border: none;
+  background: #1f6feb;
+  color: #fff;
+  font-weight: 600;
+  padding: 10px 20px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #1a5bd3;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ghost {
+  background: #eef2ff;
+  color: #1f3a8a;
+  border: 1px solid #c7d2fe;
+}
+
+.ghost:hover {
+  background: #e0e7ff;
+}
+
+.user-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  background: #f1f5f9;
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-width: 180px;
+}
+
+.user-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: #0f172a;
+  word-break: break-word;
+}
+
+.auth-prompt {
+  margin-bottom: 18px;
+  background: #e7f0ff;
+  border: 1px solid #c7ddff;
+  border-radius: 14px;
+  padding: 18px;
+}
+
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.auth-card h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.auth-card p {
+  margin: 0 0 8px;
+  color: #334155;
+}
+
+#status {
+  color: #5b6270;
+  font-size: 14px;
+}
+
+pre {
+  margin: 0;
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 13px;
+}

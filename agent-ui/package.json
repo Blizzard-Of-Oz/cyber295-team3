@@ -1,0 +1,17 @@
+{
+  "name": "gmail-agent-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-session": "^1.17.3",
+    "openai": "^4.74.0",
+    "@azure/msal-node": "^2.6.0"
+  }
+}

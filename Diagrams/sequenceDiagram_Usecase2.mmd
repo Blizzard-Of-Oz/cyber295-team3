@@ -1,0 +1,26 @@
+sequenceDiagram
+    actor User
+    participant Web as Web AI Agent
+    participant LLM as Orchestration LLMs
+    participant MCP as MCP Server
+    participant Policy as Policy Server
+    participant Audit as Audit Log DB
+    participant ExtSvc as External Service
+
+    %% Web AI Agent startup
+    Web-->>MCP: Pull available functions/tools
+    MCP-->>Web: Tool_name: send_email, read_email
+
+
+    %% Normal user flow
+    User->>Web: User Input<br/>I want to send an email<br/>to everyone in my team(team3@abc.corp) 
+    Web->>LLM: User's input + available tools
+    LLM->>Web: Call send_email from the mcp server with <br/>{"to": "team3@abc.corp","title":"Hello All"}
+    Web->>MCP: Call mcp_server
+    Note over Web,MCP: {"tool": "send_email",<br/>"arguments:"{ <br/>"from": "user@abc.corp" <br/> "to": ["team3@abc.corp"],<br/>"subject": "Hello All",<br/> "body": "Hello Everyone"}}
+    MCP->>Policy: Policy check <br/> Is this request allowed?
+    Policy->>MCP: YES
+    MCP->>ExtSvc: Send email to team3@abc.corp
+    MCP->>Audit: Log operation
+    MCP->>Web: Request executed successfully
+    Web->>User: This request has been processed successfully

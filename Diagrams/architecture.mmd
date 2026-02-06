@@ -1,0 +1,22 @@
+---
+config:
+  theme: mc
+---
+architecture-beta
+
+  group g_ui[Web UI]
+  group g_agent[Agent Service]
+  group g_llms(internet)[LLMs]
+  group g_mcp[System Backend]
+  group g_ext(internet)[External Services]
+
+  service web(server)[Web UI] in g_ui
+  service agent(brain)[Agent + Orchestrator] in g_agent
+  service orchestration(brain)[OpenAI API] in g_llms
+  service mcp(server)[Gmail MCP Server (stdio)] in g_mcp
+  service extsvc(cloud)[Gmail API] in g_ext
+
+  web:T --> B:agent
+  agent:T --> B:orchestration
+  agent:R --> L:mcp
+  mcp:R --> L:extsvc
