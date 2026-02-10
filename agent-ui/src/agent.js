@@ -77,15 +77,37 @@ export function createAgent({ mcpClientManager }) {
           ? JSON.parse(call.function.arguments)
           : {};
         debugLog("Calling MCP tool", { name });
-        const result = await mcpClientManager.callTool(name, args, context);
-        debugLog("MCP tool result", { name, ok: true });
-        toolOutputs.push({ name, result });
+        try {
+          const result = await mcpClientManager.callTool(name, args, context);
+          debugLog("MCP tool result", { name, ok: true });
+          toolOutputs.push({ name, result });
 
-        messages.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: JSON.stringify(result)
-        });
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify(result)
+          });
+        } catch (error) {
+          const errorInfo = {
+            message: error?.message || "Tool call failed",
+            reason: error?.reason || null,
+            status: error?.status || null,
+            details: error?.details || null
+          };
+          debugLog("MCP tool denied or failed", { name, error: errorInfo });
+          toolOutputs.push({ name, error: errorInfo });
+          const denialSummary = errorInfo.reason
+            ? `Request denied by policy: ${errorInfo.reason}`
+            : errorInfo.message;
+          return {
+            summary: denialSummary,
+            toolCalls: toolCalls.map((call) => ({
+              name: call.function?.name,
+              arguments: call.function?.arguments || "{}"
+            })),
+            toolOutputs
+          };
+        }
       }
 
       response = await openai.chat.completions.create({

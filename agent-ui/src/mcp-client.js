@@ -49,7 +49,11 @@ export class McpClientManager {
     const data = await response.json();
     if (!response.ok || data?.success === false) {
       this.log("Tool call failed", { status: response.status, error: data?.error });
-      throw new Error(data?.error || `Tool call failed: ${response.status}`);
+      const error = new Error(data?.error || `Tool call failed: ${response.status}`);
+      error.reason = data?.reason || null;
+      error.status = response.status;
+      error.details = data || null;
+      throw error;
     }
     this.log("Tool call succeeded", { name });
     return data.result;

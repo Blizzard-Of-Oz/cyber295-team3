@@ -8,11 +8,92 @@ function getApiUrl(endpoint) {
   return url.toString();
 }
 
+function getSelectedSource() {
+  const sourceSelect = document.getElementById("log-source");
+  return sourceSelect ? sourceSelect.value : "both";
+}
+
+function getSelectedTable() {
+  const tableSelect = document.getElementById("sql-table");
+  return tableSelect ? tableSelect.value : "mcp_actions";
+}
+
+function getSelectedPrefix() {
+  const prefixInput = document.getElementById("kv-prefix");
+  return prefixInput ? prefixInput.value || "mcp-action:" : "mcp-action:";
+}
+
+function buildLogsUrl() {
+  const params = new URLSearchParams();
+  const source = getSelectedSource();
+  params.set("source", source);
+
+  if (source === "sql" || source === "both") {
+    params.set("table", getSelectedTable());
+  }
+
+  if (source === "kv" || source === "both") {
+    params.set("prefix", getSelectedPrefix());
+  }
+
+  const baseUrl = getApiUrl("/logs");
+  return `${baseUrl}?${params.toString()}`;
+}
+
+function setSourceVisibility(source) {
+  const tableSelect = document.getElementById("sql-table");
+  const prefixInput = document.getElementById("kv-prefix");
+  const sourceFilter = document.getElementById("filter-source");
+
+  if (tableSelect) {
+    tableSelect.classList.toggle("hidden", source === "kv");
+  }
+
+  if (prefixInput) {
+    prefixInput.classList.toggle("hidden", source === "sql");
+  }
+
+  if (sourceFilter) {
+    if (source === "both") {
+      sourceFilter.disabled = false;
+    } else {
+      sourceFilter.value = source;
+      sourceFilter.disabled = true;
+    }
+  }
+}
+
+async function fetchTables() {
+  try {
+    const response = await fetch(getApiUrl("/tables"));
+    const data = await response.json();
+    if (!response.ok || !data?.tables?.length) {
+      return;
+    }
+
+    const tableSelect = document.getElementById("sql-table");
+    if (!tableSelect) return;
+    const currentValue = tableSelect.value;
+    const tableNames = data.tables
+      .map((table) => (table && typeof table === "object" ? table.name : table))
+      .filter(Boolean);
+    tableSelect.innerHTML = tableNames
+      .map((table) => `<option value="${table}">${table}</option>`)
+      .join("");
+
+    if (currentValue && tableNames.includes(currentValue)) {
+      tableSelect.value = currentValue;
+    }
+  } catch (error) {
+    console.error("Failed to fetch tables:", error.message);
+  }
+}
+
 async function fetchLogs() {
   try {
     updateStatus("Loading...", "loading");
     updateDbStatus("immuDB: checking...", "loading");
-    const response = await fetch(getApiUrl("/logs"));
+    const response = await fetch(buildLogsUrl());
     const data = await response.json();
 
     if (response.ok) {
@@ -138,7 +219,11 @@ function renderLogs(logsToRender) {
 
   tbody.innerHTML = logsToRender
     .map((log) => {
-      const action = log.action || "unknown";
+      const rawAction = log.action || "unknown";
+      const [baseAction, actionDetail] = rawAction.split(":");
+      const actionLabel = actionDetail
+        ? `${baseAction.toUpperCase()} (${actionDetail})`
+        : baseAction.toUpperCase();
       const timestamp = formatTimestamp(log.timestamp || log.ts);
       const authenticatedUser = log.authenticatedUser || "unknown";
       const requesterIp = log.requesterIp || "unknown";
@@ -148,7 +233,7 @@ function renderLogs(logsToRender) {
       return `
         <tr>
           <td class="timestamp">${timestamp}</td>
-          <td><span class="action ${action}">${action.toUpperCase()}</span></td>
+          <td><span class="action ${baseAction}">${actionLabel}</span></td>
           <td>${targetUserId}</td>
           <td>${authenticatedUser}</td>
           <td>${requesterIp}</td>
@@ -174,8 +259,9 @@ function applyFilters() {
       (log.authenticatedUser || "").toLowerCase().includes(searchText) ||
       (log.action || "").toLowerCase().includes(searchText);
 
-    const matchesAction =
-      !actionFilter || (log.action || "").toLowerCase() === actionFilter;
+    const logAction = (log.action || "").toLowerCase();
+    const baseAction = logAction.split(":")[0];
+    const matchesAction = !actionFilter || baseAction === actionFilter;
 
     const matchesSource =
       !sourceFilter || (log.source || "").toLowerCase() === sourceFilter;
@@ -218,9 +304,17 @@ document.getElementById("refresh-btn").addEventListener("click", fetchLogs);
 document.getElementById("search-box").addEventListener("input", applyFilters);
 document.getElementById("filter-action").addEventListener("change", applyFilters);
 document.getElementById("filter-source").addEventListener("change", applyFilters);
+document.getElementById("log-source").addEventListener("change", (e) => {
+  setSourceVisibility(e.target.value);
+  fetchLogs();
+});
+document.getElementById("sql-table").addEventListener("change", fetchLogs);
+document.getElementById("kv-prefix").addEventListener("change", fetchLogs);
 document.getElementById("auto-refresh-toggle").addEventListener("change", (e) =>
   toggleAutoRefresh(e.target.checked)
 );
 
+setSourceVisibility(getSelectedSource());
+fetchTables();
 fetchLogs();
 startHealthPolling();

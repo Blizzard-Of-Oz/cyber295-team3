@@ -36,14 +36,28 @@
         placeholder="Search by user, authenticated user, IP, or action..."
         class="search-input"
       />
+      <select id="log-source" class="filter-select">
+        <option value="both">Key-Value + SQL</option>
+        <option value="sql">SQL Table</option>
+        <option value="kv">Key Prefix</option>
+      </select>
+      <select id="sql-table" class="filter-select">
+        <option value="mcp_actions">mcp_actions</option>
+      </select>
+      <select id="kv-prefix" class="filter-select">
+        <option value="mcp-action:">mcp-action:</option>
+        <option value="mcp-policy:">mcp-policy:</option>
+      </select>
       <select id="filter-action" class="filter-select">
         <option value="">All Actions</option>
         <option value="enable">Enable</option>
         <option value="disable">Disable</option>
+        <option value="allow">Allow</option>
+        <option value="deny">Deny</option>
       </select>
       <select id="filter-source" class="filter-select">
         <option value="">All Sources</option>
-        <option value="kv">KV Store</option>
+        <option value="kv">Key-Value Store</option>
         <option value="sql">SQL Table</option>
       </select>
     </div>

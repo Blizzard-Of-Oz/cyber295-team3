@@ -38,6 +38,12 @@ MCP_ARGS=/absolute/path/to/mcp-server/gmail/dist/index.js
 MCP_HTTP_PORT=3301
 DEBUG=false
 
+# OPA
+OPA_ENABLED=true
+OPA_DECISION_URL=http://localhost:8181/v1/data/gmail/decision
+OPA_TIMEOUT_MS=2000
+OPA_FAIL_OPEN=false
+
 # immuDB (optional)
 IMMUDB_ENABLED=true
 IMMUDB_HOST=127.0.0.1
@@ -53,7 +59,6 @@ IMMUDB_MODE=kv
 ```
 npm run dev
 ```
-
 
 5. Server Deployment
 ```
@@ -78,3 +83,7 @@ sudo systemctl restart pm2-yao.service
 pm2 flush
 sudo systemctl restart pm2-yao.service 
 ```
+
+## OPA Policy
+
+The policy is in the opa-policies/

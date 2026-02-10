@@ -10,6 +10,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.MCP_HTTP_PORT || 5001;
 const DEBUG = process.env.DEBUG === "true";
+const OPA_ENABLED = process.env.OPA_ENABLED !== "false";
+const OPA_DECISION_URL =
+  process.env.OPA_DECISION_URL || "http://localhost:8181/v1/data/gmail/decision";
+const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
+const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
 
 function debugLog(message, meta) {
   if (!DEBUG) return;
@@ -119,6 +124,129 @@ function getAuthenticatedUser(req) {
   return "unknown";
 }
 
+function collectOpaHeaders(req) {
+  const allowedHeaders = new Set([
+    "authorization",
+    "user-agent",
+    "x-entra-token",
+    "x-authenticated-user",
+    "x-user-identity",
+    "x-user-ip",
+    "x-forwarded-for",
+    "x-real-ip"
+  ]);
+  const headers = {};
+  for (const [key, value] of Object.entries(req.headers || {})) {
+    const normalizedKey = String(key).toLowerCase();
+    if (allowedHeaders.has(normalizedKey) || normalizedKey.startsWith("x-")) {
+      headers[normalizedKey] = value;
+    }
+  }
+  return headers;
+}
+
+function buildOpaInput(req, toolName, args) {
+  const requesterIp = getRequesterIp(req);
+  const authenticatedUser = getAuthenticatedUser(req);
+  const headers = collectOpaHeaders(req);
+
+  return {
+    tool: {
+      name: toolName,
+      arguments: args
+    },
+    requester: {
+      ip: requesterIp,
+      identity: authenticatedUser,
+      token: headers["x-entra-token"] || headers.authorization || null
+    },
+    request: {
+      method: req.method,
+      path: req.path,
+      headers,
+      body: req.body || null
+    }
+  };
+}
+
+function redactOpaInput(input) {
+  if (!input || typeof input !== "object") return input;
+  const headers = { ...(input.request?.headers || {}) };
+  if (headers.authorization) headers.authorization = "[redacted]";
+  if (headers["x-entra-token"]) headers["x-entra-token"] = "[redacted]";
+
+  return {
+    ...input,
+    requester: {
+      ...input.requester,
+      token: input.requester?.token ? "[redacted]" : null
+    },
+    request: {
+      ...input.request,
+      headers
+    }
+  };
+}
+
+function normalizeOpaDecision(payload) {
+  if (!payload) return { allow: false, reason: "missing_opa_response", raw: payload };
+  if (typeof payload.result === "boolean") {
+    return { allow: payload.result, reason: payload.result ? "ok" : "denied", raw: payload };
+  }
+  if (payload.result && typeof payload.result === "object") {
+    const allow = Boolean(payload.result.allow);
+    const reason = payload.result.reason || (allow ? "ok" : "denied");
+    return { allow, reason, raw: payload };
+  }
+  return { allow: false, reason: "invalid_opa_response", raw: payload };
+}
+
+async function callOpaDecision(req, toolName, args) {
+  if (!OPA_ENABLED) {
+    return { allow: true, reason: "opa_disabled", raw: null };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPA_TIMEOUT_MS);
+  const input = buildOpaInput(req, toolName, args);
+  if (DEBUG) {
+    debugLog("OPA request", { url: OPA_DECISION_URL, input: redactOpaInput(input) });
+  }
+
+  try {
+    const response = await fetch(OPA_DECISION_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ input }),
+      signal: controller.signal
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (DEBUG) {
+      debugLog("OPA response", { status: response.status, payload });
+    }
+    if (!response.ok) {
+      return {
+        allow: OPA_FAIL_OPEN,
+        reason: `opa_http_${response.status}`,
+        raw: payload
+      };
+    }
+
+    return normalizeOpaDecision(payload);
+  } catch (error) {
+    return {
+      allow: OPA_FAIL_OPEN,
+      reason: error?.name === "AbortError" ? "opa_timeout" : "opa_error",
+      raw: { message: error?.message || String(error) }
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function deriveTarget(args = {}) {
   if (Array.isArray(args.to) && args.to.length > 0) return args.to.join(",");
   if (typeof args.to === "string") return args.to;
@@ -174,11 +302,34 @@ app.post("/call-tool", async (req, res) => {
       return res.status(400).json({ error: "name and arguments are required" });
     }
 
-    const result = await mcpClientManager.callTool(name, args);
-    debugLog("Tool call completed", { name });
-
+    const opaDecision = await callOpaDecision(req, name, args);
     const requesterIp = getRequesterIp(req);
     const targetUserId = deriveTarget(args);
+
+    immudbLogger
+      .recordPolicyDecision({
+        authenticatedUser,
+        requesterIp,
+        toolName: name,
+        targetUserId,
+        allow: opaDecision.allow,
+        reason: opaDecision.reason,
+        opaResponse: opaDecision.raw
+      })
+      .catch((error) => {
+        console.warn("Failed to write immuDB policy log:", error?.message || error);
+      });
+
+    if (!opaDecision.allow) {
+      debugLog("OPA denied request", { name, reason: opaDecision.reason });
+      return res.status(403).json({
+        error: "Request denied by policy",
+        reason: opaDecision.reason
+      });
+    }
+
+    const result = await mcpClientManager.callTool(name, args);
+    debugLog("Tool call completed", { name });
 
     immudbLogger
       .recordAction({

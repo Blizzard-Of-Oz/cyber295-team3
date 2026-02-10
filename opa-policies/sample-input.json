@@ -1,0 +1,43 @@
+{
+  "tool": {
+    "name": "gmail.send_email",
+    "arguments": {
+      "to": ["billyyao6@gmail.com", "other@example.com"],
+      "cc": "ccperson@example.com",
+      "bcc": ["hidden@example.com"],
+      "message": {
+        "to": ["fallback@example.com"]
+      },
+      "subject": "Sample subject",
+      "body": "Sample body"
+    }
+  },
+  "requester": {
+    "ip": "1.2.3.4",
+    "identity": "alice@example.com",
+    "token": "Bearer example-token"
+  },
+  "request": {
+    "method": "POST",
+    "path": "/call-tool",
+    "headers": {
+      "content-type": "application/json",
+      "x-authenticated-user": "alice@example.com",
+      "x-user-ip": "1.2.3.4",
+      "user-agent": "curl/8.5.0"
+    },
+    "body": {
+      "name": "gmail.send_email",
+      "arguments": {
+        "to": ["billyyao6@gmail.com", "other@example.com"],
+        "cc": "ccperson@example.com",
+        "bcc": ["hidden@example.com"],
+        "message": {
+          "to": ["fallback@example.com"]
+        },
+        "subject": "Sample subject",
+        "body": "Sample body"
+      }
+    }
+  }
+}

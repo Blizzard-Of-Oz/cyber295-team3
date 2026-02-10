@@ -118,6 +118,10 @@ header p {
   display: none;
 }
 
+.hidden {
+  display: none;
+}
+
 .controls.disabled,
 .table-wrapper.disabled,
 .status-bar.disabled {
@@ -128,6 +132,11 @@ header p {
 .controls.disabled select,
 .status-bar.disabled button {
   pointer-events: none;
+}
+
+.filter-select:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
 }
 
 @keyframes pulse {
@@ -273,6 +282,16 @@ tbody tr:hover {
 }
 
 .action.disable {
+  background: #ffcccc;
+  color: #c62828;
+}
+
+.action.allow {
+  background: #c8e6c9;
+  color: #2e7d32;
+}
+
+.action.deny {
   background: #ffcccc;
   color: #c62828;
 }
