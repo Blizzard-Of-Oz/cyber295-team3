@@ -45,6 +45,7 @@ export class ImmuDBLogger {
     this.database = database;
     this.client = null;
     this.ready = null;
+    this.sqlQueue = Promise.resolve();
   }
 
   async init() {
@@ -108,26 +109,34 @@ export class ImmuDBLogger {
     await this.client.useDatabase({ databasename: this.database });
   }
 
-  async execSqlWithRetry(sql, attempts = 3) {
-    let lastError;
-    for (let i = 0; i < attempts; i += 1) {
-      try {
-        await this.client.SQLExec({ sql });
-        return;
-      } catch (error) {
-        lastError = error;
-        const message = error?.details || error?.message || "";
-        if (!message.includes("tx read conflict")) {
-          throw error;
-        }
-        const delayMs = 50 * (i + 1);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-    }
+  enqueueSql(task) {
+    const run = this.sqlQueue.then(task, task);
+    this.sqlQueue = run.catch(() => {});
+    return run;
+  }
 
-    if (lastError) {
-      throw lastError;
-    }
+  async execSqlWithRetry(sql, attempts = 3) {
+    return this.enqueueSql(async () => {
+      let lastError;
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          await this.client.SQLExec({ sql });
+          return;
+        } catch (error) {
+          lastError = error;
+          const message = error?.details || error?.message || "";
+          if (!message.includes("tx read conflict")) {
+            throw error;
+          }
+          const delayMs = 75 * (i + 1) + Math.floor(Math.random() * 50);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+
+      if (lastError) {
+        throw lastError;
+      }
+    });
   }
 
   async recordAction({ authenticatedUser, requesterIp, targetUserId, action }) {
