@@ -89,6 +89,7 @@ export class ImmuDBLogger {
       "target_user_id VARCHAR," +
       "allow VARCHAR," +
       "reason VARCHAR," +
+      "opa_request VARCHAR," +
       "opa_response VARCHAR," +
       "ts VARCHAR," +
       "PRIMARY KEY (id))";
@@ -151,6 +152,7 @@ export class ImmuDBLogger {
     targetUserId,
     allow,
     reason,
+    opaRequest,
     opaResponse
   }) {
     if (!this.enabled) return;
@@ -169,6 +171,7 @@ export class ImmuDBLogger {
         targetUserId,
         allow: Boolean(allow),
         reason: reason || "unknown",
+        opaRequest,
         opaResponse,
         timestamp
       });
@@ -179,8 +182,8 @@ export class ImmuDBLogger {
       if (!this.useSql) return;
       const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
       const sql =
-        "INSERT INTO mcp_policy_decisions(authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_response, ts) VALUES('" +
-        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}')`;
+        "INSERT INTO mcp_policy_decisions(authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_request, opa_response, ts) VALUES('" +
+        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}'`;
       await this.client.SQLExec({ sql });
     };
 

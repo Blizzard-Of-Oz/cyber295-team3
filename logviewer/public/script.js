@@ -2,6 +2,8 @@ let allLogs = [];
 let autoRefreshInterval = null;
 let autoRefreshEnabled = false;
 let healthInterval = null;
+let sqlTables = [];
+let kvPrefixes = ["mcp-action:", "mcp-policy:"];
 
 function getApiUrl(endpoint) {
   const url = new URL(`./api${endpoint}`, window.location.href);
@@ -9,58 +11,48 @@ function getApiUrl(endpoint) {
 }
 
 function getSelectedSource() {
-  const sourceSelect = document.getElementById("log-source");
-  return sourceSelect ? sourceSelect.value : "both";
+  const sourceSelect = document.getElementById("storage-source");
+  return sourceSelect ? sourceSelect.value : "sql";
 }
 
-function getSelectedTable() {
-  const tableSelect = document.getElementById("sql-table");
-  return tableSelect ? tableSelect.value : "mcp_actions";
-}
-
-function getSelectedPrefix() {
-  const prefixInput = document.getElementById("kv-prefix");
-  return prefixInput ? prefixInput.value || "mcp-action:" : "mcp-action:";
+function getSelectedTarget() {
+  const targetSelect = document.getElementById("storage-target");
+  return targetSelect ? targetSelect.value : "mcp_actions";
 }
 
 function buildLogsUrl() {
-  const params = new URLSearchParams();
   const source = getSelectedSource();
-  params.set("source", source);
-
-  if (source === "sql" || source === "both") {
-    params.set("table", getSelectedTable());
-  }
-
-  if (source === "kv" || source === "both") {
-    params.set("prefix", getSelectedPrefix());
+  const target = getSelectedTarget();
+  const params = new URLSearchParams();
+  
+  if (source === "sql") {
+    params.set("source", "sql");
+    params.set("table", target);
+  } else {
+    params.set("source", "kv");
+    params.set("prefix", target);
   }
 
   const baseUrl = getApiUrl("/logs");
   return `${baseUrl}?${params.toString()}`;
 }
 
-function setSourceVisibility(source) {
-  const tableSelect = document.getElementById("sql-table");
-  const prefixInput = document.getElementById("kv-prefix");
-  const sourceFilter = document.getElementById("filter-source");
+function updateStorageTargets() {
+  const source = getSelectedSource();
+  const targetSelect = document.getElementById("storage-target");
+  if (!targetSelect) return;
 
-  if (tableSelect) {
-    tableSelect.classList.toggle("hidden", source === "kv");
+  if (source === "sql") {
+    targetSelect.innerHTML = sqlTables
+      .map((table) => `<option value="${table}">${table}</option>`)
+      .join("");
+  } else {
+    targetSelect.innerHTML = kvPrefixes
+      .map((prefix) => `<option value="${prefix}">${prefix}</option>`)
+      .join("");
   }
 
-  if (prefixInput) {
-    prefixInput.classList.toggle("hidden", source === "sql");
-  }
-
-  if (sourceFilter) {
-    if (source === "both") {
-      sourceFilter.disabled = false;
-    } else {
-      sourceFilter.value = source;
-      sourceFilter.disabled = true;
-    }
-  }
+  fetchLogs();
 }
 
 async function fetchTables() {
@@ -71,22 +63,18 @@ async function fetchTables() {
       return;
     }
 
-    const tableSelect = document.getElementById("sql-table");
-    if (!tableSelect) return;
-    const currentValue = tableSelect.value;
-    const tableNames = data.tables
+    sqlTables = data.tables
       .map((table) => (table && typeof table === "object" ? table.name : table))
       .filter(Boolean);
-    tableSelect.innerHTML = tableNames
-      .map((table) => `<option value="${table}">${table}</option>`)
-      .join("");
-
-    if (currentValue && tableNames.includes(currentValue)) {
-      tableSelect.value = currentValue;
+    
+    // Update the dropdown if we're in SQL mode
+    if (getSelectedSource() === "sql") {
+      updateStorageTargets();
     }
   } catch (error) {
     console.error("Failed to fetch tables:", error.message);
   }
+
 }
 
 async function fetchLogs() {
@@ -212,13 +200,13 @@ function renderLogs(logsToRender) {
 
   if (logsToRender.length === 0) {
     tbody.innerHTML =
-      '<tr><td colspan="6" class="loading">No audit logs found</td></tr>';
+      '<tr><td colspan="7" class="loading">No audit logs found</td></tr>';
     document.getElementById("log-count").textContent = "Showing 0 entries";
     return;
   }
 
   tbody.innerHTML = logsToRender
-    .map((log) => {
+    .map((log, idx) => {
       const rawAction = log.action || "unknown";
       const [baseAction, actionDetail] = rawAction.split(":");
       const actionLabel = actionDetail
@@ -229,6 +217,11 @@ function renderLogs(logsToRender) {
       const requesterIp = log.requesterIp || "unknown";
       const targetUserId = log.targetUserId || "unknown";
       const source = log.source || "unknown";
+      const hasDetails = log.opaRequest || log.opaResponse || log.reason;
+
+      const detailsBtn = hasDetails
+        ? `<button class="details-btn" data-log-idx="${idx}">View</button>`
+        : "-";
 
       return `
         <tr>
@@ -238,18 +231,67 @@ function renderLogs(logsToRender) {
           <td>${authenticatedUser}</td>
           <td>${requesterIp}</td>
           <td><span class="source ${source}">${source.toUpperCase()}</span></td>
+          <td>${detailsBtn}</td>
         </tr>
       `;
     })
     .join("");
 
   document.getElementById("log-count").textContent = `Showing ${logsToRender.length} entries`;
+
+  // Attach event listeners
+  document.querySelectorAll(".details-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const idx = parseInt(e.target.dataset.logIdx, 10);
+      showDetailsModal(logsToRender[idx]);
+    });
+  });
+}
+
+function showDetailsModal(log) {
+  const modal = document.getElementById("details-modal");
+  const detailsBody = document.getElementById("details-body");
+
+  let html = "<div class='details-grid'>";
+
+  if (log.reason) {
+    html += `<div class="detail-row"><strong>Reason:</strong> <span>${escapeHtml(log.reason)}</span></div>`;
+  }
+
+  if (log.opaRequest) {
+    try {
+      const opaReq = typeof log.opaRequest === "string" ? JSON.parse(log.opaRequest) : log.opaRequest;
+      html += `<div class="detail-row"><strong>OPA Request:</strong></div>`;
+      html += `<pre>${escapeHtml(JSON.stringify(opaReq, null, 2))}</pre>`;
+    } catch (e) {
+      html += `<div class="detail-row"><strong>OPA Request:</strong> <span>${escapeHtml(log.opaRequest)}</span></div>`;
+    }
+  }
+
+  if (log.opaResponse) {
+    try {
+      const opaResp = typeof log.opaResponse === "string" ? JSON.parse(log.opaResponse) : log.opaResponse;
+      html += `<div class="detail-row"><strong>OPA Response:</strong></div>`;
+      html += `<pre>${escapeHtml(JSON.stringify(opaResp, null, 2))}</pre>`;
+    } catch (e) {
+      html += `<div class="detail-row"><strong>OPA Response:</strong> <span>${escapeHtml(log.opaResponse)}</span></div>`;
+    }
+  }
+
+  html += "</div>";
+  detailsBody.innerHTML = html;
+  modal.classList.remove("hidden");
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function applyFilters() {
   const searchText = document.getElementById("search-box").value.toLowerCase();
   const actionFilter = document.getElementById("filter-action").value;
-  const sourceFilter = document.getElementById("filter-source").value;
 
   const filtered = allLogs.filter((log) => {
     const matchesSearch =
@@ -263,10 +305,7 @@ function applyFilters() {
     const baseAction = logAction.split(":")[0];
     const matchesAction = !actionFilter || baseAction === actionFilter;
 
-    const matchesSource =
-      !sourceFilter || (log.source || "").toLowerCase() === sourceFilter;
-
-    return matchesSearch && matchesAction && matchesSource;
+    return matchesSearch && matchesAction;
   });
 
   renderLogs(filtered);
@@ -303,18 +342,19 @@ function startHealthPolling() {
 document.getElementById("refresh-btn").addEventListener("click", fetchLogs);
 document.getElementById("search-box").addEventListener("input", applyFilters);
 document.getElementById("filter-action").addEventListener("change", applyFilters);
-document.getElementById("filter-source").addEventListener("change", applyFilters);
-document.getElementById("log-source").addEventListener("change", (e) => {
-  setSourceVisibility(e.target.value);
-  fetchLogs();
-});
-document.getElementById("sql-table").addEventListener("change", fetchLogs);
-document.getElementById("kv-prefix").addEventListener("change", fetchLogs);
+document.getElementById("storage-source").addEventListener("change", updateStorageTargets);
+document.getElementById("storage-target").addEventListener("change", fetchLogs);
 document.getElementById("auto-refresh-toggle").addEventListener("change", (e) =>
   toggleAutoRefresh(e.target.checked)
 );
 
-setSourceVisibility(getSelectedSource());
+// Modal close handler
+document.getElementById("details-modal").addEventListener("click", (e) => {
+  if (e.target.id === "details-modal" || e.target.classList.contains("modal-close")) {
+    document.getElementById("details-modal").classList.add("hidden");
+  }
+});
+
 fetchTables();
 fetchLogs();
 startHealthPolling();

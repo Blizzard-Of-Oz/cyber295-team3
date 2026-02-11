@@ -166,10 +166,37 @@ async function fetchKvLogs(prefix) {
       try {
         const key = entry.key.toString();
         const value = JSON.parse(entry.value.toString());
+
+        // Normalize fields based on prefix type
+        let action = "unknown";
+        let targetUserId = value.targetUserId || "unknown";
+        let opaRequest = null;
+        let opaResponse = null;
+
+        if (prefix === "mcp-policy:") {
+          // Policy decisions have toolName and allow instead of action
+          const allowRaw = String(value.allow || false).toLowerCase();
+          const allowNormalized = allowRaw === "true" ? "allow" : "deny";
+          const toolName = value.toolName || "unknown";
+          action = `${allowNormalized}:${toolName}`;
+          opaRequest = value.opaRequest;
+          opaResponse = value.opaResponse;
+        } else {
+          // Regular actions
+          action = value.action || "unknown";
+        }
+
         logs.push({
           source: "kv",
           key,
-          ...value
+          authenticatedUser: value.authenticatedUser || "unknown",
+          requesterIp: value.requesterIp || "unknown",
+          targetUserId,
+          action,
+          reason: value.reason || null,
+          opaRequest,
+          opaResponse,
+          timestamp: value.timestamp || "unknown"
         });
       } catch (e) {
         console.error("Failed to parse KV entry:", e.message);
@@ -223,14 +250,35 @@ async function fetchSqlLogs(tableName) {
     };
   }
 
-  const sqlResult = await immudbClient.SQLQuery({
-    sql: sqlQuery
-  });
-
-  if (sqlResult) {
-    sqlResult.forEach((row) => {
-      logs.push(parseRow(row));
+  try {
+    const sqlResult = await immudbClient.SQLQuery({
+      sql: sqlQuery
     });
+
+    if (sqlResult) {
+      sqlResult.forEach((row) => {
+        logs.push(parseRow(row));
+      });
+    }
+  } catch (error) {
+    // If it's a policy decisions table and the query fails, might be missing opa_request/opa_response columns
+    // Try again if we haven't already (to avoid infinite retry)
+    if (tableName === "mcp_policy_decisions" && sqlQuery.includes("opa_request")) {
+      console.warn("Policy decisions query with OPA columns failed, retrying without them...");
+      const sqlQueryFallback =
+        "SELECT id, authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, ts FROM mcp_policy_decisions ORDER BY id DESC LIMIT 100";
+      const sqlResult = await immudbClient.SQLQuery({
+        sql: sqlQueryFallback
+      });
+
+      if (sqlResult) {
+        sqlResult.forEach((row) => {
+          logs.push(parseRow(row));
+        });
+      }
+    } else {
+      throw error;
+    }
   }
 
   return logs;

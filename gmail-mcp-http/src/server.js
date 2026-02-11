@@ -306,6 +306,7 @@ app.post("/call-tool", async (req, res) => {
     const requesterIp = getRequesterIp(req);
     const targetUserId = deriveTarget(args);
 
+    const opaRequest = buildOpaInput(req, name, args);
     immudbLogger
       .recordPolicyDecision({
         authenticatedUser,
@@ -314,6 +315,7 @@ app.post("/call-tool", async (req, res) => {
         targetUserId,
         allow: opaDecision.allow,
         reason: opaDecision.reason,
+        opaRequest: redactOpaInput(opaRequest),
         opaResponse: opaDecision.raw
       })
       .catch((error) => {

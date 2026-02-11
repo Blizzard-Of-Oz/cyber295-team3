@@ -36,17 +36,12 @@
         placeholder="Search by user, authenticated user, IP, or action..."
         class="search-input"
       />
-      <select id="log-source" class="filter-select">
-        <option value="both">Key-Value + SQL</option>
+      <select id="storage-source" class="filter-select">
         <option value="sql">SQL Table</option>
-        <option value="kv">Key Prefix</option>
+        <option value="kv">Key-Value Store</option>
       </select>
-      <select id="sql-table" class="filter-select">
+      <select id="storage-target" class="filter-select">
         <option value="mcp_actions">mcp_actions</option>
-      </select>
-      <select id="kv-prefix" class="filter-select">
-        <option value="mcp-action:">mcp-action:</option>
-        <option value="mcp-policy:">mcp-policy:</option>
       </select>
       <select id="filter-action" class="filter-select">
         <option value="">All Actions</option>
@@ -54,11 +49,6 @@
         <option value="disable">Disable</option>
         <option value="allow">Allow</option>
         <option value="deny">Deny</option>
-      </select>
-      <select id="filter-source" class="filter-select">
-        <option value="">All Sources</option>
-        <option value="kv">Key-Value Store</option>
-        <option value="sql">SQL Table</option>
       </select>
     </div>
 
@@ -72,14 +62,23 @@
             <th>Authenticated User</th>
             <th>Requester IP</th>
             <th>Source</th>
+            <th>Details</th>
           </tr>
         </thead>
         <tbody id="logs-tbody">
           <tr>
-            <td colspan="6" class="loading">Loading audit logs...</td>
+            <td colspan="7" class="loading">Loading audit logs...</td>
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <div id="details-modal" class="modal hidden">
+      <div class="modal-content">
+        <button class="modal-close">&times;</button>
+        <h2>Event Details</h2>
+        <div id="details-body"></div>
+      </div>
     </div>
 
     <div class="footer">
