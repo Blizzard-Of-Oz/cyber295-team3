@@ -49,22 +49,32 @@ export function createAgent({ mcpClientManager }) {
       { role: "user", content: requirement }
     ];
 
-    let response = await openai.chat.completions.create({
-      model,
-      messages,
-      tools,
-      tool_choice: "auto"
-    });
-
-    let assistantMessage = response.choices[0]?.message;
-    const toolCalls = assistantMessage?.tool_calls || [];
     const toolOutputs = [];
+    const allToolCalls = [];
+    let assistantMessage = null;
+    let response = null;
+    let stepsRemaining = 4;
 
-    if (toolCalls.length > 0) {
+    while (stepsRemaining > 0) {
+      response = await openai.chat.completions.create({
+        model,
+        messages,
+        tools,
+        tool_choice: "auto"
+      });
+
+      assistantMessage = response.choices[0]?.message;
+      const toolCalls = assistantMessage?.tool_calls || [];
+
+      if (toolCalls.length === 0) {
+        break;
+      }
+
       debugLog("Tool calls returned", toolCalls.map((call) => ({
         name: call.function?.name,
         id: call.id
       })));
+
       messages.push({
         role: "assistant",
         content: assistantMessage.content || "",
@@ -81,6 +91,7 @@ export function createAgent({ mcpClientManager }) {
           const result = await mcpClientManager.callTool(name, args, context);
           debugLog("MCP tool result", { name, ok: true });
           toolOutputs.push({ name, result });
+          allToolCalls.push({ name, arguments: call.function?.arguments || "{}" });
 
           messages.push({
             role: "tool",
@@ -96,34 +107,24 @@ export function createAgent({ mcpClientManager }) {
           };
           debugLog("MCP tool denied or failed", { name, error: errorInfo });
           toolOutputs.push({ name, error: errorInfo });
+          allToolCalls.push({ name, arguments: call.function?.arguments || "{}" });
           const denialSummary = errorInfo.reason
             ? `Request denied by policy: ${errorInfo.reason}`
             : errorInfo.message;
           return {
             summary: denialSummary,
-            toolCalls: toolCalls.map((call) => ({
-              name: call.function?.name,
-              arguments: call.function?.arguments || "{}"
-            })),
+            toolCalls: allToolCalls,
             toolOutputs
           };
         }
       }
 
-      response = await openai.chat.completions.create({
-        model,
-        messages
-      });
-
-      assistantMessage = response.choices[0]?.message;
+      stepsRemaining -= 1;
     }
 
     return {
       summary: assistantMessage?.content || "",
-      toolCalls: toolCalls.map((call) => ({
-        name: call.function?.name,
-        arguments: call.function?.arguments || "{}"
-      })),
+      toolCalls: allToolCalls,
       toolOutputs
     };
   }
