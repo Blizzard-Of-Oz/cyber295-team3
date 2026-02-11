@@ -17,8 +17,8 @@ https://github.com/GongRzhe/Gmail-MCP-Server
   - Expose MCP capabilities via HTTP APIs  
   - Extend functionality beyond the base MCP server  
   - Write audit logs to a database
-  - Policy Enforcement (Planned)  
-    An **OPA (Open Policy Agent) policy server** will be integrated in a later phase to enforce access and security policies.
+  - Policy Enforcement
+    An **OPA (Open Policy Agent) policy server** is integrated. The request will be evaluated based on the policies in opa-polices folder
 
 - **Web UI / AI Agent / MCP Client**  
   The Web UI acts as:
