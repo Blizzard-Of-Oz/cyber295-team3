@@ -291,7 +291,6 @@ function escapeHtml(text) {
 
 function applyFilters() {
   const searchText = document.getElementById("search-box").value.toLowerCase();
-  const actionFilter = document.getElementById("filter-action").value;
 
   const filtered = allLogs.filter((log) => {
     const matchesSearch =
@@ -301,11 +300,7 @@ function applyFilters() {
       (log.authenticatedUser || "").toLowerCase().includes(searchText) ||
       (log.action || "").toLowerCase().includes(searchText);
 
-    const logAction = (log.action || "").toLowerCase();
-    const baseAction = logAction.split(":")[0];
-    const matchesAction = !actionFilter || baseAction === actionFilter;
-
-    return matchesSearch && matchesAction;
+    return matchesSearch;
   });
 
   renderLogs(filtered);
@@ -341,7 +336,6 @@ function startHealthPolling() {
 
 document.getElementById("refresh-btn").addEventListener("click", fetchLogs);
 document.getElementById("search-box").addEventListener("input", applyFilters);
-document.getElementById("filter-action").addEventListener("change", applyFilters);
 document.getElementById("storage-source").addEventListener("change", updateStorageTargets);
 document.getElementById("storage-target").addEventListener("change", fetchLogs);
 document.getElementById("auto-refresh-toggle").addEventListener("change", (e) =>

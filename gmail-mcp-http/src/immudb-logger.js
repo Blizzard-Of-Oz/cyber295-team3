@@ -95,8 +95,8 @@ export class ImmuDBLogger {
       "PRIMARY KEY (id))";
 
     try {
-      await this.client.SQLExec({ sql: ddlActions });
-      await this.client.SQLExec({ sql: ddlPolicy });
+      await this.execSqlWithRetry(ddlActions);
+      await this.execSqlWithRetry(ddlPolicy);
     } catch (error) {
       console.warn("Failed to ensure immuDB SQL table:", error.message);
     }
@@ -106,6 +106,28 @@ export class ImmuDBLogger {
     if (!this.client) return;
     await this.client.login({ user: this.user, password: this.password });
     await this.client.useDatabase({ databasename: this.database });
+  }
+
+  async execSqlWithRetry(sql, attempts = 3) {
+    let lastError;
+    for (let i = 0; i < attempts; i += 1) {
+      try {
+        await this.client.SQLExec({ sql });
+        return;
+      } catch (error) {
+        lastError = error;
+        const message = error?.details || error?.message || "";
+        if (!message.includes("tx read conflict")) {
+          throw error;
+        }
+        const delayMs = 50 * (i + 1);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
   }
 
   async recordAction({ authenticatedUser, requesterIp, targetUserId, action }) {
@@ -128,7 +150,7 @@ export class ImmuDBLogger {
       const sql =
         "INSERT INTO mcp_actions(authenticated_user, requester_ip, target_user_id, action, ts) VALUES('" +
         `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(targetUserId)}','${esc(action)}','${esc(timestamp)}')`;
-      await this.client.SQLExec({ sql });
+      await this.execSqlWithRetry(sql);
     };
 
     const executeWithRetry = async (fn) => {
@@ -183,8 +205,8 @@ export class ImmuDBLogger {
       const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
       const sql =
         "INSERT INTO mcp_policy_decisions(authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_request, opa_response, ts) VALUES('" +
-        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}'`;
-      await this.client.SQLExec({ sql });
+        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}')`;
+      await this.execSqlWithRetry(sql);
     };
 
     const executeWithRetry = async (fn) => {
