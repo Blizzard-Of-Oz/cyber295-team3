@@ -53,7 +53,7 @@ export function createAgent({ mcpClientManager }) {
     const allToolCalls = [];
     let assistantMessage = null;
     let response = null;
-    let stepsRemaining = 4;
+    let stepsRemaining = 7;
 
     while (stepsRemaining > 0) {
       response = await openai.chat.completions.create({
