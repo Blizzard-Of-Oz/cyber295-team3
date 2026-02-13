@@ -179,7 +179,7 @@ async function fetchHealth() {
 
 function showError(message) {
   const tbody = document.getElementById("logs-tbody");
-  tbody.innerHTML = `<tr><td colspan="6" class="loading" style="color: #f44336;">${message}</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="7" class="loading" style="color: #f44336;">${message}</td></tr>`;
 }
 
 function formatTimestamp(timestamp) {
@@ -217,7 +217,17 @@ function renderLogs(logsToRender) {
       const requesterIp = log.requesterIp || "unknown";
       const targetUserId = log.targetUserId || "unknown";
       const source = log.source || "unknown";
-      const hasDetails = log.opaRequest || log.opaResponse || log.reason;
+      const hasDetails =
+        log.opaRequest ||
+        log.opaResponse ||
+        log.reason ||
+        log.status ||
+        log.durationMs !== null && log.durationMs !== undefined ||
+        log.resultSummary ||
+        log.errorCode ||
+        log.errorMessage ||
+        log.correlationId;
+      const statusLabel = log.status ? ` (${log.status})` : "";
 
       const detailsBtn = hasDetails
         ? `<button class="details-btn" data-log-idx="${idx}">View</button>`
@@ -226,7 +236,7 @@ function renderLogs(logsToRender) {
       return `
         <tr>
           <td class="timestamp">${timestamp}</td>
-          <td><span class="action ${baseAction}">${actionLabel}</span></td>
+          <td><span class="action ${baseAction}">${actionLabel}${statusLabel}</span></td>
           <td>${targetUserId}</td>
           <td>${authenticatedUser}</td>
           <td>${requesterIp}</td>
@@ -256,6 +266,30 @@ function showDetailsModal(log) {
 
   if (log.reason) {
     html += `<div class="detail-row"><strong>Reason:</strong> <span>${escapeHtml(log.reason)}</span></div>`;
+  }
+
+  if (log.status) {
+    html += `<div class="detail-row"><strong>Status:</strong> <span>${escapeHtml(log.status)}</span></div>`;
+  }
+
+  if (log.durationMs !== null && log.durationMs !== undefined) {
+    html += `<div class="detail-row"><strong>Duration (ms):</strong> <span>${escapeHtml(String(log.durationMs))}</span></div>`;
+  }
+
+  if (log.resultSummary) {
+    html += `<div class="detail-row"><strong>Result:</strong> <span>${escapeHtml(log.resultSummary)}</span></div>`;
+  }
+
+  if (log.errorCode) {
+    html += `<div class="detail-row"><strong>Error Code:</strong> <span>${escapeHtml(log.errorCode)}</span></div>`;
+  }
+
+  if (log.errorMessage) {
+    html += `<div class="detail-row"><strong>Error Message:</strong> <span>${escapeHtml(log.errorMessage)}</span></div>`;
+  }
+
+  if (log.correlationId) {
+    html += `<div class="detail-row"><strong>Correlation ID:</strong> <span>${escapeHtml(log.correlationId)}</span></div>`;
   }
 
   if (log.opaRequest) {

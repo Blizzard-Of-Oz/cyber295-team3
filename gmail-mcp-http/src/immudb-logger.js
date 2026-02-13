@@ -78,6 +78,12 @@ export class ImmuDBLogger {
       "requester_ip VARCHAR," +
       "target_user_id VARCHAR," +
       "action VARCHAR," +
+      "status VARCHAR," +
+      "duration_ms INTEGER," +
+      "result_summary VARCHAR," +
+      "error_code VARCHAR," +
+      "error_message VARCHAR," +
+      "correlation_id VARCHAR," +
       "ts VARCHAR," +
       "PRIMARY KEY (id))";
 
@@ -98,8 +104,33 @@ export class ImmuDBLogger {
     try {
       await this.execSqlWithRetry(ddlActions);
       await this.execSqlWithRetry(ddlPolicy);
+      await this.ensureActionColumns();
     } catch (error) {
       console.warn("Failed to ensure immuDB SQL table:", error.message);
+    }
+  }
+
+  async ensureActionColumns() {
+    if (!this.useSql) return;
+
+    const columns = [
+      ["status", "VARCHAR"],
+      ["duration_ms", "INTEGER"],
+      ["result_summary", "VARCHAR"],
+      ["error_code", "VARCHAR"],
+      ["error_message", "VARCHAR"],
+      ["correlation_id", "VARCHAR"]
+    ];
+
+    for (const [name, type] of columns) {
+      try {
+        await this.execSqlWithRetry(`ALTER TABLE mcp_actions ADD COLUMN ${name} ${type}`);
+      } catch (error) {
+        const message = (error?.details || error?.message || "").toLowerCase();
+        if (!message.includes("exist") && !message.includes("duplicate") && !message.includes("already")) {
+          console.warn(`Failed to add mcp_actions column ${name}:`, error?.message || error);
+        }
+      }
     }
   }
 
@@ -139,7 +170,18 @@ export class ImmuDBLogger {
     });
   }
 
-  async recordAction({ authenticatedUser, requesterIp, targetUserId, action }) {
+  async recordAction({
+    authenticatedUser,
+    requesterIp,
+    targetUserId,
+    action,
+    status,
+    durationMs,
+    resultSummary,
+    errorCode,
+    errorMessage,
+    correlationId
+  }) {
     if (!this.enabled) return;
     if (!requesterIp || !action) return;
 
@@ -149,16 +191,29 @@ export class ImmuDBLogger {
     const kvWrite = async () => {
       if (!this.useKv) return;
       const key = `mcp-action:${Date.now()}:${crypto.randomBytes(6).toString("hex")}`;
-      const value = JSON.stringify({ authenticatedUser, requesterIp, targetUserId, action, timestamp });
+      const value = JSON.stringify({
+        authenticatedUser,
+        requesterIp,
+        targetUserId,
+        action,
+        status,
+        duration_ms: durationMs,
+        result_summary: resultSummary,
+        error_code: errorCode,
+        error_message: errorMessage,
+        correlation_id: correlationId,
+        timestamp
+      });
       await this.client.set({ key, value });
     };
 
     const sqlInsert = async () => {
       if (!this.useSql) return;
       const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
+      const durationValue = Number.isFinite(durationMs) ? durationMs : null;
       const sql =
-        "INSERT INTO mcp_actions(authenticated_user, requester_ip, target_user_id, action, ts) VALUES('" +
-        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(targetUserId)}','${esc(action)}','${esc(timestamp)}')`;
+        "INSERT INTO mcp_actions(authenticated_user, requester_ip, target_user_id, action, status, duration_ms, result_summary, error_code, error_message, correlation_id, ts) VALUES('" +
+        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(targetUserId)}','${esc(action)}','${esc(status)}',${durationValue === null ? "null" : durationValue},'${esc(resultSummary)}','${esc(errorCode)}','${esc(errorMessage)}','${esc(correlationId)}','${esc(timestamp)}')`;
       await this.execSqlWithRetry(sql);
     };
 

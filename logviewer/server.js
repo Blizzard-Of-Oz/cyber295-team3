@@ -193,6 +193,12 @@ async function fetchKvLogs(prefix) {
           requesterIp: value.requesterIp || "unknown",
           targetUserId,
           action,
+          status: value.status || null,
+          durationMs: value.duration_ms ?? null,
+          resultSummary: value.result_summary || null,
+          errorCode: value.error_code || null,
+          errorMessage: value.error_message || null,
+          correlationId: value.correlation_id || null,
           reason: value.reason || null,
           opaRequest,
           opaResponse,
@@ -210,10 +216,17 @@ async function fetchKvLogs(prefix) {
 async function fetchSqlLogs(tableName) {
   const logs = [];
   let sqlQuery =
-    `SELECT id, authenticated_user, requester_ip, target_user_id, action, ts FROM ${tableName} ORDER BY id DESC LIMIT 100`;
+    `SELECT id, authenticated_user, requester_ip, target_user_id, action, status, duration_ms, result_summary, error_code, error_message, correlation_id, ts FROM ${tableName} ORDER BY id DESC LIMIT 100`;
   let parseRow = (row) => {
     const getId = (val) => val?.prop || val;
     const getStr = (val) => val?.prop || val || "unknown";
+    const getNullableStr = (val) => (val?.prop ?? val ?? null);
+    const getNumber = (val) => {
+      const raw = val?.prop ?? val;
+      if (raw === null || raw === undefined || raw === "") return null;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
 
     return {
       source: "sql",
@@ -222,16 +235,23 @@ async function fetchSqlLogs(tableName) {
       requesterIp: getStr(row.requester_ip),
       targetUserId: getStr(row.target_user_id),
       action: getStr(row.action),
+      status: getNullableStr(row.status),
+      durationMs: getNumber(row.duration_ms),
+      resultSummary: getNullableStr(row.result_summary),
+      errorCode: getNullableStr(row.error_code),
+      errorMessage: getNullableStr(row.error_message),
+      correlationId: getNullableStr(row.correlation_id),
       timestamp: getStr(row.ts)
     };
   };
 
   if (tableName === "mcp_policy_decisions") {
     sqlQuery =
-      "SELECT id, authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, ts FROM mcp_policy_decisions ORDER BY id DESC LIMIT 100";
+      "SELECT id, authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_request, opa_response, ts FROM mcp_policy_decisions ORDER BY id DESC LIMIT 100";
     parseRow = (row) => {
       const getId = (val) => val?.prop || val;
       const getStr = (val) => val?.prop || val || "unknown";
+      const getNullableStr = (val) => (val?.prop ?? val ?? null);
       const allowRaw = getStr(row.allow);
       const allowNormalized = String(allowRaw).toLowerCase() === "true" ? "allow" : "deny";
       const toolName = getStr(row.tool_name);
@@ -245,6 +265,8 @@ async function fetchSqlLogs(tableName) {
         targetUserId: getStr(row.target_user_id),
         action: `${allowNormalized}:${toolName}`,
         reason,
+        opaRequest: getNullableStr(row.opa_request),
+        opaResponse: getNullableStr(row.opa_response),
         timestamp: getStr(row.ts)
       };
     };
@@ -263,7 +285,20 @@ async function fetchSqlLogs(tableName) {
   } catch (error) {
     // If it's a policy decisions table and the query fails, might be missing opa_request/opa_response columns
     // Try again if we haven't already (to avoid infinite retry)
-    if (tableName === "mcp_policy_decisions" && sqlQuery.includes("opa_request")) {
+    if (tableName === "mcp_actions" && sqlQuery.includes("status")) {
+      console.warn("Actions query with extended columns failed, retrying without them...");
+      const sqlQueryFallback =
+        `SELECT id, authenticated_user, requester_ip, target_user_id, action, ts FROM ${tableName} ORDER BY id DESC LIMIT 100`;
+      const sqlResult = await immudbClient.SQLQuery({
+        sql: sqlQueryFallback
+      });
+
+      if (sqlResult) {
+        sqlResult.forEach((row) => {
+          logs.push(parseRow(row));
+        });
+      }
+    } else if (tableName === "mcp_policy_decisions" && sqlQuery.includes("opa_request")) {
       console.warn("Policy decisions query with OPA columns failed, retrying without them...");
       const sqlQueryFallback =
         "SELECT id, authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, ts FROM mcp_policy_decisions ORDER BY id DESC LIMIT 100";

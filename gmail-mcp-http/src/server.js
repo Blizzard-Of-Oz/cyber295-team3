@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
@@ -143,6 +144,42 @@ function collectOpaHeaders(req) {
     }
   }
   return headers;
+}
+
+function getCorrelationId(req) {
+  const headerId = req.headers["x-correlation-id"] || req.headers["x-request-id"];
+  if (typeof headerId === "string" && headerId.trim()) {
+    return headerId.trim();
+  }
+  return crypto.randomBytes(12).toString("hex");
+}
+
+function truncateText(value, maxLength = 500) {
+  if (typeof value !== "string") return value;
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function extractToolError(result) {
+  if (!result || typeof result !== "object") return null;
+  if (result.isError === true) {
+    return {
+      code: result.code || "tool_error",
+      message: result.message || "Tool reported an error"
+    };
+  }
+  const content = Array.isArray(result.content) ? result.content : [];
+  for (const entry of content) {
+    const text = typeof entry?.text === "string" ? entry.text.trim() : "";
+    if (!text) continue;
+    if (/^(error|failed)\b[:\s-]/i.test(text)) {
+      return {
+        code: "tool_result_error",
+        message: text
+      };
+    }
+  }
+  return null;
 }
 
 function buildOpaInput(req, toolName, args) {
@@ -288,6 +325,13 @@ app.get("/tools", async (_req, res) => {
 });
 
 app.post("/call-tool", async (req, res) => {
+  const startedAt = Date.now();
+  const correlationId = getCorrelationId(req);
+  res.set("x-correlation-id", correlationId);
+  let auditStatus = "failure";
+  let auditSummary = "unknown";
+  let auditErrorCode = null;
+  let auditErrorMessage = null;
   try {
     const { name, arguments: args } = req.body || {};
     const authenticatedUser = getAuthenticatedUser(req);
@@ -324,6 +368,24 @@ app.post("/call-tool", async (req, res) => {
 
     if (!opaDecision.allow) {
       debugLog("OPA denied request", { name, reason: opaDecision.reason });
+      auditStatus = "failure";
+      auditSummary = `${name} denied by policy`;
+      immudbLogger
+        .recordAction({
+          authenticatedUser,
+          requesterIp,
+          targetUserId,
+          action: name,
+          status: auditStatus,
+          durationMs: Date.now() - startedAt,
+          resultSummary: auditSummary,
+          errorCode: "policy_denied",
+          errorMessage: opaDecision.reason,
+          correlationId
+        })
+        .catch((error) => {
+          console.warn("Failed to write immuDB log:", error?.message || error);
+        });
       return res.status(403).json({
         error: "Request denied by policy",
         reason: opaDecision.reason
@@ -333,12 +395,31 @@ app.post("/call-tool", async (req, res) => {
     const result = await mcpClientManager.callTool(name, args);
     debugLog("Tool call completed", { name });
 
+    const toolError = extractToolError(result);
+    if (toolError) {
+      auditStatus = "failure";
+      auditSummary = truncateText(toolError.message, 200);
+      auditErrorCode = toolError.code;
+      auditErrorMessage = truncateText(toolError.message);
+    } else {
+      auditStatus = "success";
+      auditSummary = `${name} completed`;
+      auditErrorCode = null;
+      auditErrorMessage = null;
+    }
+
     immudbLogger
       .recordAction({
         authenticatedUser,
         requesterIp,
         targetUserId,
-        action: name
+        action: name,
+        status: auditStatus,
+        durationMs: Date.now() - startedAt,
+        resultSummary: auditSummary,
+        errorCode: auditErrorCode,
+        errorMessage: auditErrorMessage,
+        correlationId
       })
       .catch((error) => {
         console.warn("Failed to write immuDB log:", error?.message || error);
@@ -347,13 +428,42 @@ app.post("/call-tool", async (req, res) => {
     debugLog("Audit log scheduled", {
       action: name,
       requesterIp,
-      targetUserId
+      targetUserId,
+      status: auditStatus,
+      correlationId
     });
 
-    res.json({ success: true, result });
+    res.json({ success: true, result, correlationId });
   } catch (error) {
+    auditErrorCode = error?.code || error?.name || "unknown";
+    auditErrorMessage = truncateText(error?.message || String(error));
+    auditSummary = "tool call failed";
     debugLog("Tool call failed", { error: error?.message || error });
-    res.status(500).json({ error: error?.message || "Tool call failed" });
+    try {
+      const { name, arguments: args } = req.body || {};
+      const authenticatedUser = getAuthenticatedUser(req);
+      const requesterIp = getRequesterIp(req);
+      const targetUserId = deriveTarget(args);
+      immudbLogger
+        .recordAction({
+          authenticatedUser,
+          requesterIp,
+          targetUserId,
+          action: name || "unknown",
+          status: auditStatus,
+          durationMs: Date.now() - startedAt,
+          resultSummary: auditSummary,
+          errorCode: auditErrorCode,
+          errorMessage: auditErrorMessage,
+          correlationId
+        })
+        .catch((logError) => {
+          console.warn("Failed to write immuDB log:", logError?.message || logError);
+        });
+    } catch (logError) {
+      console.warn("Failed to build immuDB log payload:", logError?.message || logError);
+    }
+    res.status(500).json({ error: error?.message || "Tool call failed", correlationId });
   }
 });
 

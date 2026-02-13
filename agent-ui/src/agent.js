@@ -1,4 +1,5 @@
 import { OpenAI } from "openai";
+import crypto from "crypto";
 
 export function createAgent({ mcpClientManager }) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -24,6 +25,9 @@ export function createAgent({ mcpClientManager }) {
     if (!openai.apiKey) {
       throw new Error("OPENAI_API_KEY is not set");
     }
+
+    const correlationId = crypto.randomBytes(12).toString("hex");
+    context = { ...context, correlationId };
 
     const mcpTools = await mcpClientManager.listTools();
     debugLog("Tools loaded for agent", { count: mcpTools.length });

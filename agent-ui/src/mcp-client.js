@@ -37,6 +37,9 @@ export class McpClientManager {
     if (context.requesterIp) {
       headers["X-User-Ip"] = context.requesterIp;
     }
+    if (context.correlationId) {
+      headers["X-Correlation-Id"] = context.correlationId;
+    }
     const response = await fetch(`${this.baseUrl}/call-tool`, {
       method: "POST",
       headers,
