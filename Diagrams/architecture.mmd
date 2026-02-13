@@ -4,12 +4,13 @@ config:
 ---
 architecture-beta
 
-  group g_ui(internet) [Web UI]
+  group g_ACF[Agent Credential Firewall System]
+  group g_ui(internet) [Web UI] in g_ACF
   group g_entraid(internet) [Azure]
   group g_llms(internet)[LLMs]
-  group g_mcp[System Backend]
-  group g_db[Audit Log]
-  group g_opa[Policy Server]
+  group g_mcp[System Backend] in g_ACF
+  group g_db[Audit Log] in g_ACF
+  group g_opa[Policy Server] in g_ACF
   group g_ext(internet)[External Services]
   group g_opa_policy(internet)[OPA Policy Repositories]
 
