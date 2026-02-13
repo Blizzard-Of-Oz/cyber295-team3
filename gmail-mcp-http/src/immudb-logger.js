@@ -104,33 +104,8 @@ export class ImmuDBLogger {
     try {
       await this.execSqlWithRetry(ddlActions);
       await this.execSqlWithRetry(ddlPolicy);
-      await this.ensureActionColumns();
     } catch (error) {
       console.warn("Failed to ensure immuDB SQL table:", error.message);
-    }
-  }
-
-  async ensureActionColumns() {
-    if (!this.useSql) return;
-
-    const columns = [
-      ["status", "VARCHAR"],
-      ["duration_ms", "INTEGER"],
-      ["result_summary", "VARCHAR"],
-      ["error_code", "VARCHAR"],
-      ["error_message", "VARCHAR"],
-      ["correlation_id", "VARCHAR"]
-    ];
-
-    for (const [name, type] of columns) {
-      try {
-        await this.execSqlWithRetry(`ALTER TABLE mcp_actions ADD COLUMN ${name} ${type}`);
-      } catch (error) {
-        const message = (error?.details || error?.message || "").toLowerCase();
-        if (!message.includes("exist") && !message.includes("duplicate") && !message.includes("already")) {
-          console.warn(`Failed to add mcp_actions column ${name}:`, error?.message || error);
-        }
-      }
     }
   }
 
