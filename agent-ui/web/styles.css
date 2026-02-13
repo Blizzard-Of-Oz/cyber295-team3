@@ -120,6 +120,20 @@ button:disabled {
   padding: 18px;
 }
 
+.csrf-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 14px;
+  padding: 12px 14px;
+  color: #9a3412;
+  font-weight: 600;
+}
+
 .auth-card {
   display: flex;
   flex-direction: column;

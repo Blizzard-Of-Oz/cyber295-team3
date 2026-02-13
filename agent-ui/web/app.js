@@ -9,11 +9,17 @@ const signinBtn = document.getElementById("signinBtn");
 const signoutBtn = document.getElementById("signoutBtn");
 const userInfo = document.getElementById("userInfo");
 const userName = document.getElementById("userName");
+const csrfBanner = document.getElementById("csrfBanner");
+const csrfMessage = document.getElementById("csrfMessage");
+const csrfRetry = document.getElementById("csrfRetry");
 
 let isAuthenticated = false;
+let csrfToken = "";
 
 function showAuthPrompt() {
   isAuthenticated = false;
+  csrfToken = "";
+  csrfBanner.style.display = "none";
   authPrompt.style.display = "block";
   userInfo.style.display = "none";
   runButton.disabled = true;
@@ -30,6 +36,40 @@ function showApp(user) {
   }
 }
 
+function showCsrfBanner(message) {
+  csrfMessage.textContent = message || "Security token unavailable.";
+  csrfBanner.style.display = "flex";
+}
+
+function hideCsrfBanner() {
+  csrfBanner.style.display = "none";
+}
+
+async function loadCsrfToken() {
+  try {
+    const response = await fetch("/api/csrf");
+    if (!response.ok) {
+      csrfToken = "";
+      if (isAuthenticated) {
+        showCsrfBanner("Security token unavailable. Please retry.");
+      }
+      return;
+    }
+    const data = await response.json();
+    csrfToken = data.token || "";
+    if (csrfToken) {
+      hideCsrfBanner();
+    } else if (isAuthenticated) {
+      showCsrfBanner("Security token unavailable. Please retry.");
+    }
+  } catch {
+    csrfToken = "";
+    if (isAuthenticated) {
+      showCsrfBanner("Security token unavailable. Please retry.");
+    }
+  }
+}
+
 async function checkAuthentication() {
   try {
     const response = await fetch("/api/user");
@@ -39,6 +79,7 @@ async function checkAuthentication() {
     }
     const data = await response.json();
     showApp(data.user);
+    await loadCsrfToken();
   } catch (error) {
     showAuthPrompt();
   }
@@ -74,6 +115,15 @@ async function runAgent() {
     return;
   }
 
+  if (!csrfToken) {
+    await loadCsrfToken();
+  }
+  if (!csrfToken) {
+    showCsrfBanner("Security token unavailable. Please retry.");
+    statusEl.textContent = "Unable to load CSRF token.";
+    return;
+  }
+
   statusEl.textContent = "Running...";
   summaryEl.textContent = "";
   toolCallsEl.textContent = "";
@@ -82,7 +132,7 @@ async function runAgent() {
   try {
     const response = await fetch("/api/assist", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
       body: JSON.stringify({ requirement })
     });
 
@@ -113,7 +163,35 @@ signinBtn.addEventListener("click", () => {
 });
 
 signoutBtn.addEventListener("click", () => {
-  window.location.href = "/auth/signout";
+  if (!csrfToken) {
+    loadCsrfToken().then(() => {
+      if (csrfToken) {
+        fetch("/auth/signout", {
+          method: "POST",
+          headers: { "X-CSRF-Token": csrfToken }
+        }).then(() => {
+          window.location.reload();
+        });
+      } else {
+        showCsrfBanner("Security token unavailable. Please retry.");
+        statusEl.textContent = "Unable to load CSRF token.";
+      }
+    });
+    return;
+  }
+  fetch("/auth/signout", {
+    method: "POST",
+    headers: { "X-CSRF-Token": csrfToken }
+  }).then(() => {
+    window.location.reload();
+  });
+});
+
+csrfRetry.addEventListener("click", async () => {
+  await loadCsrfToken();
+  if (!csrfToken) {
+    showCsrfBanner("Security token unavailable. Please retry.");
+  }
 });
 
 checkHealth();

@@ -3,6 +3,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import session from "express-session";
+import crypto from "crypto";
 import * as msal from "@azure/msal-node";
 import { McpClientManager } from "./mcp-client.js";
 import { createAgent } from "./agent.js";
@@ -57,6 +58,11 @@ app.use(express.static(path.join(__dirname, "..", "web")));
 
 app.set("trust proxy", true);
 
+app.use((_req, res, next) => {
+  res.set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet");
+  next();
+});
+
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "change-me-in-production",
@@ -64,6 +70,7 @@ app.use(
     saveUninitialized: false,
     cookie: {
       secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000
     }
@@ -115,6 +122,28 @@ function isAuthenticated(req, res, next) {
   return res.status(401).json({ error: "Not authenticated", requiresAuth: true });
 }
 
+function ensureCsrfToken(req) {
+  if (!req.session?.csrfToken) {
+    req.session.csrfToken = crypto.randomBytes(32).toString("hex");
+  }
+  return req.session.csrfToken;
+}
+
+function requireCsrf(req, res, next) {
+  const token = req.get("x-csrf-token");
+  if (!token || token !== req.session?.csrfToken) {
+    return res.status(403).json({ error: "Invalid CSRF token" });
+  }
+  return next();
+}
+
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+    return next();
+  }
+  return requireCsrf(req, res, next);
+});
+
 app.get("/auth/signin", async (req, res) => {
   const redirectUri = getRedirectUri(req);
   const authCodeUrlParameters = {
@@ -143,6 +172,7 @@ app.get("/auth/callback", async (req, res) => {
     const response = await msalInstance.acquireTokenByCode(tokenRequest);
     req.session.account = response.account;
     req.session.accessToken = response.accessToken;
+    ensureCsrfToken(req);
     res.redirect("/");
   } catch (error) {
     debugLog("Auth callback failed", { error: error?.message || error });
@@ -150,7 +180,11 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
-app.get("/auth/signout", (req, res) => {
+app.get("/auth/signout", (_req, res) => {
+  res.status(405).send("Use POST /auth/signout");
+});
+
+app.post("/auth/signout", (req, res) => {
   const postLogoutRedirectUri = getPostLogoutRedirectUri(req);
   req.session.destroy((err) => {
     if (err) {
@@ -164,6 +198,11 @@ app.get("/auth/signout", (req, res) => {
 app.get("/api/health", (req, res) => {
   debugLog("Health check");
   res.json({ status: "ok", authenticated: Boolean(req.session?.account) });
+});
+
+app.get("/api/csrf", (req, res) => {
+  const token = ensureCsrfToken(req);
+  res.json({ token });
 });
 
 app.get("/api/user", isAuthenticated, (req, res) => {
