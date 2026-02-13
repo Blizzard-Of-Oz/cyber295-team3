@@ -12,7 +12,7 @@ architecture-beta
   group g_db[Audit Log] in g_ACF
   group g_opa[Policy Server] in g_ACF
   group g_ext(internet)[External Services]
-  group g_opa_policy(internet)[OPA Policy Repositories]
+  group g_opa_policy(internet)[OPA Policy Repo]
 
   service web(server)[Web UI] in g_ui
   service entraid(server)[Entra ID] in g_entraid
@@ -25,7 +25,7 @@ architecture-beta
   service opa(server)[Open Policy Agent] in g_opa
   service opal_server(server)[OPAL_Server] in g_opa
   service opal_client(server)[OPAL_Client] in g_opa
-  service opa_policy_repo(server)[OPA Policy Repository] in g_opa_policy
+  service opa_policy_repo(server)[Policy Repo] in g_opa_policy
 
 
   web:L --> R:entraid
