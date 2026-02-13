@@ -34,5 +34,5 @@ The project combines:
 - Gmail MCP Server  
 - A custom HTTP wrapper with auditing  
 - A Web UI that functions as the AI agent, MCP client, and orchestration layer using the OpenAI API  
-- Future policy enforcement via OPA  
+- Policy enforcement via OPA  
 
