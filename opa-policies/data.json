@@ -1,0 +1,26 @@
+{
+  "config": {
+    "internal_domains": [
+      "ischool.berkeley.edu",
+      "billyyaoischoolberkeley.onmicrosoft.com"
+    ],
+    "allowed_external_emails": [
+      "team3.mcp@gmail.com"
+    ],
+    "blocked_recipients": [
+      "yaoyaozong@gmail.com"
+    ],
+    "broadcast_patterns": [
+      "^all@",
+      "^everyone@",
+      "^companywide@",
+      "^all-employees@"
+    ],
+    "broadcast_allowed_identities": [
+      "team3@billyyaoischoolberkeley.onmicrosoft.com"
+    ],
+    "max_recipients": 10,
+    "max_body_chars": 20000,
+    "require_nonempty_subject": true
+  }
+}

@@ -36,3 +36,6 @@
 
 # MCP/Gmail credentials
 **/.gmail-mcp/
+
+# opa cli binary
+opa
