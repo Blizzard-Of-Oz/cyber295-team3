@@ -86,4 +86,4 @@ sudo systemctl restart pm2-yao.service
 
 ## OPA Policy
 
-The policy is in the opa-policies/
+The policy is in the opa_policies/

@@ -47,7 +47,7 @@ Edit `data.json` under the `config` object:
 From repo root:
 
 ```bash
-opa test opa-policies -v
+opa test opa_policies -v
 ```
 
 ## Quick demos
@@ -70,3 +70,12 @@ To ensure that the OPA server automatically loads the latest policies from the p
 
 1. **OPAL Server** monitors policy repo changes and pushes updates.
 2. **OPAL Client** receives updates and PUTs them into OPA.
+
+---
+
+## Setup OPA testing environment on local 
+1. Download OPA CLI
+1. Run 'opa test'
+1. Troubleshooting
+  1. opa eval
+  1. curl

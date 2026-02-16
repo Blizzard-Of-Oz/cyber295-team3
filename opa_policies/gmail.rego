@@ -2,6 +2,18 @@ package gmail
 
 import future.keywords
 
+# --- Config resolver (local vs OPAL namespaced bundle) ---
+
+cfg := c if {
+  c := data.config
+}
+
+cfg := c if {
+  not data.config
+  c := data["opa_policies"].config
+}
+
+
 default allow = false
 
 default decision = {
@@ -172,11 +184,11 @@ external_recipient_present if {
 
 is_allowed_recipient(addr) if {
   domain := recipient_domain(addr)
-  data.config.internal_domains[_] == domain
+  cfg.internal_domains[_] == domain
 }
 
 is_allowed_recipient(addr) if {
-  data.config.allowed_external_emails[_] == addr
+  cfg.allowed_external_emails[_] == addr
 }
 
 # -------------------------
@@ -186,7 +198,7 @@ is_allowed_recipient(addr) if {
 deny_reasons contains reason if {
   is_send_action
   normalized_recipients[recipient]
-  data.config.blocked_recipients[_] == recipient
+  cfg.blocked_recipients[_] == recipient
   reason := sprintf("blocked_recipient:%s", [recipient])
 }
 
@@ -200,7 +212,7 @@ deny_reasons contains reason if {
 deny_reasons contains reason if {
   is_send_action
   normalized_recipients[recipient]
-  pattern := data.config.broadcast_patterns[_]
+  pattern := cfg.broadcast_patterns[_]
   regex.match(pattern, recipient)
   not is_broadcast_privileged
   reason := sprintf("broadcast_requires_privileged_identity:%s", [recipient])
@@ -208,25 +220,25 @@ deny_reasons contains reason if {
 
 deny_reasons contains reason if {
   is_send_action
-  recipient_count > data.config.max_recipients
-  reason := sprintf("max_recipients_exceeded:%d>%d", [recipient_count, data.config.max_recipients])
+  recipient_count > cfg.max_recipients
+  reason := sprintf("max_recipients_exceeded:%d>%d", [recipient_count, cfg.max_recipients])
 }
 
 deny_reasons contains reason if {
   is_send_action
-  data.config.require_nonempty_subject
+  cfg.require_nonempty_subject
   subject == ""
   reason := "subject_required"
 }
 
 deny_reasons contains reason if {
   is_send_action
-  count(body) > data.config.max_body_chars
-  reason := sprintf("body_too_large:%d>%d", [count(body), data.config.max_body_chars])
+  count(body) > cfg.max_body_chars
+  reason := sprintf("body_too_large:%d>%d", [count(body), cfg.max_body_chars])
 }
 
 is_broadcast_privileged if {
-  data.config.broadcast_allowed_identities[_] == requester_identity
+  cfg.broadcast_allowed_identities[_] == requester_identity
 }
 
 # -------------------------
