@@ -1,70 +1,69 @@
 package gmail
 
-default allow = false
+# Make OPAL happy with Rego v1 Syntax
+import future.keywords
+
+# Rego v1 (OPA 1.x strict)
+
+default allow := false
 
 denied_recipients := {"yaoyaozong@gmail.com"}
 
-recipients[addr] {
-	type_name(input.tool.arguments.to) == "array"
-	addr := input.tool.arguments.to[_]
+# --- helpers ---
+
+as_array(x) := [] if x == null
+as_array(x) := x if type_name(x) == "array"
+as_array(x) := [x] if type_name(x) == "string"
+
+# --- recipients extraction (set) ---
+# NOTE: In v1, partial set rules must use "contains" in the HEAD.
+
+recipients contains addr if {
+  a := object.get(input.tool, "arguments", {})
+  addr := as_array(object.get(a, "to", null))[_]
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.to) == "string"
-	addr := input.tool.arguments.to
+recipients contains addr if {
+  a := object.get(input.tool, "arguments", {})
+  addr := as_array(object.get(a, "cc", null))[_]
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.cc) == "array"
-	addr := input.tool.arguments.cc[_]
+recipients contains addr if {
+  a := object.get(input.tool, "arguments", {})
+  addr := as_array(object.get(a, "bcc", null))[_]
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.cc) == "string"
-	addr := input.tool.arguments.cc
+recipients contains addr if {
+  a := object.get(input.tool, "arguments", {})
+  m := object.get(a, "message", {})
+  addr := as_array(object.get(m, "to", null))[_]
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.bcc) == "array"
-	addr := input.tool.arguments.bcc[_]
+# --- deny reasons (set) ---
+
+deny contains reason if {
+  recipients[recipient]                 # membership test (NO "contains" here)
+  denied_recipients[blocked]            # membership test
+  lower(recipient) == lower(blocked)
+  reason := sprintf("recipient %s is blocked", [blocked])
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.bcc) == "string"
-	addr := input.tool.arguments.bcc
+# --- allow / reason / decision ---
+
+allow if {
+  count(deny) == 0
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.message.to) == "array"
-	addr := input.tool.arguments.message.to[_]
+reason := "ok" if {
+  allow
 }
 
-recipients[addr] {
-	type_name(input.tool.arguments.message.to) == "string"
-	addr := input.tool.arguments.message.to
+reason := r if {
+  not allow
+  deny[r]
 }
 
-deny[reason] {
-	recipients[recipient]
-	denied_recipients[blocked]
-	lower(recipient) == lower(blocked)
-	reason := sprintf("recipient %s is blocked", [blocked])
-}
-
-allow {
-	count(deny) == 0
-}
-
-decision = {
-	"allow": allow,
-	"reason": reason,
-}
-
-reason = "ok" {
-	allow
-}
-
-reason = r {
-	not allow
-	deny[r]
+decision := {
+  "allow": allow,
+  "reason": reason,
 }
