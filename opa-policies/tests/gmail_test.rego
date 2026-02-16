@@ -1,5 +1,7 @@
 package gmail_test
 
+import future.keywords
+
 base_input := {
   "tool": {
     "name": "send_email",
@@ -19,12 +21,12 @@ base_input := {
   }
 }
 
-test_allow_internal_team_email {
+test_allow_internal_team_email if {
   data.gmail.allow with input as base_input
 }
 
-test_deny_blocked_specific_recipient {
-  input := object.union(base_input, {
+test_deny_blocked_specific_recipient if {
+  inp := object.union(base_input, {
     "tool": {
       "name": "send_email",
       "arguments": {
@@ -35,12 +37,14 @@ test_deny_blocked_specific_recipient {
     }
   })
 
-  not data.gmail.allow with input as input
-  contains(data.gmail.decision.reason with input as input, "blocked_recipient:")
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  contains(r, "blocked_recipient:")
 }
 
-test_deny_external_recipient_not_allowed {
-  input := object.union(base_input, {
+test_deny_external_recipient_not_allowed if {
+  inp := object.union(base_input, {
     "tool": {
       "name": "send_email",
       "arguments": {
@@ -51,12 +55,14 @@ test_deny_external_recipient_not_allowed {
     }
   })
 
-  not data.gmail.allow with input as input
-  contains(data.gmail.decision.reason with input as input, "external_recipient_not_allowed:")
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  contains(r, "external_recipient_not_allowed:")
 }
 
-test_allow_whitelisted_external_email {
-  input := object.union(base_input, {
+test_allow_whitelisted_external_email if {
+  inp := object.union(base_input, {
     "tool": {
       "name": "send_email",
       "arguments": {
@@ -67,11 +73,11 @@ test_allow_whitelisted_external_email {
     }
   })
 
-  data.gmail.allow with input as input
+  data.gmail.allow with input as inp
 }
 
-test_deny_broadcast_for_non_privileged_requester {
-  input := {
+test_deny_broadcast_for_non_privileged_requester if {
+  inp := {
     "tool": {
       "name": "send_email",
       "arguments": {
@@ -90,12 +96,14 @@ test_deny_broadcast_for_non_privileged_requester {
     }
   }
 
-  not data.gmail.allow with input as input
-  contains(data.gmail.decision.reason with input as input, "broadcast_requires_privileged_identity:")
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  contains(r, "broadcast_requires_privileged_identity:")
 }
 
-test_allow_broadcast_for_privileged_requester {
-  input := {
+test_allow_broadcast_for_privileged_requester if {
+  inp := {
     "request": {
       "body": {
         "name": "send_email",
@@ -111,11 +119,11 @@ test_allow_broadcast_for_privileged_requester {
     }
   }
 
-  data.gmail.allow with input as input
+  data.gmail.allow with input as inp
 }
 
-test_deny_bulk_recipients_over_limit {
-  input := object.union(base_input, {
+test_deny_bulk_recipients_over_limit if {
+  inp := object.union(base_input, {
     "tool": {
       "name": "send_email",
       "arguments": {
@@ -138,12 +146,14 @@ test_deny_bulk_recipients_over_limit {
     }
   })
 
-  not data.gmail.allow with input as input
-  contains(data.gmail.decision.reason with input as input, "max_recipients_exceeded:")
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  contains(r, "max_recipients_exceeded:")
 }
 
-test_deny_empty_subject_when_required {
-  input := object.union(base_input, {
+test_deny_empty_subject_when_required if {
+  inp := object.union(base_input, {
     "tool": {
       "name": "send_email",
       "arguments": {
@@ -154,12 +164,14 @@ test_deny_empty_subject_when_required {
     }
   })
 
-  not data.gmail.allow with input as input
-  data.gmail.decision.reason with input as input == "subject_required"
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  r == "subject_required"
 }
 
-test_non_send_action_is_not_blocked {
-  input := {
+test_non_send_action_is_not_blocked if {
+  inp := {
     "tool": {
       "name": "get_email",
       "arguments": {
@@ -168,5 +180,5 @@ test_non_send_action_is_not_blocked {
     }
   }
 
-  data.gmail.allow with input as input
+  data.gmail.allow with input as inp
 }
