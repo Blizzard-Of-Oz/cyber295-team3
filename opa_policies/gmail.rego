@@ -75,11 +75,36 @@ requester_has_role(role_name) if {
 # Business hours check
 # -------------------------
 
+# Parse timezone string like "UTC-8" or "UTC+8" to numeric offset
+parse_timezone_offset(tz_string) = offset if {
+  startswith(tz_string, "UTC")
+  tz_part := substring(tz_string, 3, -1)
+  # Handle negative offset like "-6"
+  offset := to_number(tz_part)
+}
+
+parse_timezone_offset(tz_string) = 0 if {
+  not startswith(tz_string, "UTC")
+}
+
 current_hour := hour if {
-  timestamp := object.get(input, "timestamp", time.now_ns())
+  # Explicit timestamp provided - treat as UTC
+  timestamp := input.timestamp
   ns_per_hour := 3600000000000
   hours_since_epoch := timestamp / ns_per_hour
   hour := hours_since_epoch % 24
+}
+
+current_hour := hour if {
+  # No timestamp provided - use current time with timezone offset
+  not input.timestamp
+  timestamp := time.now_ns()
+  ns_per_hour := 3600000000000
+  hours_since_epoch := timestamp / ns_per_hour
+  utc_hour := hours_since_epoch % 24
+  timezone_string := object.get(cfg.business_hours, "timezone", "UTC+0")
+  timezone_offset := parse_timezone_offset(timezone_string)
+  hour := (utc_hour + timezone_offset + 24) % 24
 }
 
 is_within_business_hours if {

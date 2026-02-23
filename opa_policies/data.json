@@ -24,7 +24,8 @@
     "require_nonempty_subject": true,
     "business_hours": {
       "start_hour": 9,
-      "end_hour": 18
+      "end_hour": 18,
+      "timezone": "UTC-6"
     },
     "user_roles": {
       "roles": [

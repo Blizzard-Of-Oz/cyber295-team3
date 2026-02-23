@@ -292,7 +292,7 @@ test_deny_sendemail_to_soc_team_outside_business_hours_soc_analyst if {
         "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com"
       }
     },
-    "timestamp": 72000000000000
+    "timestamp": 14400000000000
   }
 
   not data.gmail.allow with input as inp
