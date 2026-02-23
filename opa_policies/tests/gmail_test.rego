@@ -182,3 +182,121 @@ test_non_send_action_is_not_blocked if {
 
   data.gmail.allow with input as inp
 }
+# -------------------------
+# Role-based access control tests
+# -------------------------
+
+test_soc_analyst_role_exists if {
+  roles := data.user_roles.roles
+  count([r | r := roles[_]; r.name == "soc_analyst"]) > 0
+}
+
+test_requester_has_soc_analyst_role if {
+  inp := {
+    "tool": {
+      "name": "send_email",
+      "arguments": {
+        "to": ["alice@ischool.berkeley.edu"],
+        "subject": "Test",
+        "body": "Test message"
+      }
+    },
+    "requester": {
+      "identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"
+    },
+    "request": {
+      "headers": {
+        "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com"
+      }
+    }
+  }
+
+  data.gmail.requester_has_role("soc_analyst") with input as inp
+}
+
+# -------------------------
+# SOC Team access control tests
+# -------------------------
+
+test_soc_team_exists if {
+  soc_team := data.teams.soc_team
+  soc_team.members
+}
+
+test_deny_sendemail_to_soc_team_without_soc_analyst_role if {
+  inp := {
+    "tool": {
+      "name": "send_email",
+      "arguments": {
+        "to": ["member1@billyyaoischoolberkeley.onmicrosoft.com"],
+        "subject": "Test",
+        "body": "Test message"
+      }
+    },
+    "requester": {
+      "identity": "regular.user@ischool.berkeley.edu"
+    },
+    "request": {
+      "headers": {
+        "x-authenticated-user": "regular.user@ischool.berkeley.edu"
+      }
+    },
+    "timestamp": 50400000000000
+  }
+
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  contains(r, "soc_analyst_role_required_to_email_soc_team:")
+}
+
+test_allow_sendemail_to_soc_team_with_soc_analyst_role if {
+  inp := {
+    "tool": {
+      "name": "send_email",
+      "arguments": {
+        "to": ["member1@billyyaoischoolberkeley.onmicrosoft.com"],
+        "subject": "Test",
+        "body": "Test message"
+      }
+    },
+    "requester": {
+      "identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"
+    },
+    "request": {
+      "headers": {
+        "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com"
+      }
+    },
+    "timestamp": 50400000000000
+  }
+
+  data.gmail.allow with input as inp
+}
+
+test_deny_sendemail_to_soc_team_outside_business_hours_soc_analyst if {
+  inp := {
+    "tool": {
+      "name": "send_email",
+      "arguments": {
+        "to": ["member1@billyyaoischoolberkeley.onmicrosoft.com"],
+        "subject": "Test",
+        "body": "Test message"
+      }
+    },
+    "requester": {
+      "identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"
+    },
+    "request": {
+      "headers": {
+        "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com"
+      }
+    },
+    "timestamp": 72000000000000
+  }
+
+  not data.gmail.allow with input as inp
+
+  r := data.gmail.decision.reason with input as inp
+  contains(r, "soc_team_email_outside_business_hours:")
+}

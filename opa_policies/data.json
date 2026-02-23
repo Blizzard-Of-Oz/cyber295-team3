@@ -21,6 +21,29 @@
     ],
     "max_recipients": 10,
     "max_body_chars": 20000,
-    "require_nonempty_subject": true
+    "require_nonempty_subject": true,
+    "business_hours": {
+      "start_hour": 9,
+      "end_hour": 18
+    }
+  },
+  "user_roles": {
+    "roles": [
+      {
+        "name": "soc_analyst",
+        "description": "Security Operations Center Analyst",
+        "members": [
+          "team3@billyyaoischoolberkeley.onmicrosoft.com"
+        ]
+      }
+    ]
+  },
+  "teams": {
+    "soc_team": {
+      "description": "Security Operations Center Team",
+      "members": [
+        "member1@billyyaoischoolberkeley.onmicrosoft.com"
+      ]
+    }
   }
 }

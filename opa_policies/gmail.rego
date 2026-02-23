@@ -50,6 +50,48 @@ requester_identity := lower(trim_ws(
   )
 ))
 
+# -------------------------
+# Role-based access control
+# -------------------------
+
+user_has_role(user_id, role_name) if {
+  roles_data := data.user_roles
+  roles_array := object.get(roles_data, "roles", [])
+  role := roles_array[_]
+  role.name == role_name
+  role.members[_] == user_id
+}
+
+requester_roles contains role.name if {
+  roles_data := data.user_roles
+  roles_array := object.get(roles_data, "roles", [])
+  role := roles_array[_]
+  role.members[_] == requester_identity
+}
+
+requester_has_role(role_name) if {
+  requester_roles[role_name]
+}
+
+# -------------------------
+# Business hours check
+# -------------------------
+
+current_hour := hour if {
+  timestamp := object.get(input, "timestamp", time.now_ns())
+  ns_per_hour := 3600000000000
+  hours_since_epoch := timestamp / ns_per_hour
+  hour := hours_since_epoch % 24
+}
+
+is_within_business_hours if {
+  business_hours := cfg.business_hours
+  start_hour := object.get(business_hours, "start_hour", 9)
+  end_hour := object.get(business_hours, "end_hour", 18)
+  current_hour >= start_hour
+  current_hour < end_hour
+}
+
 is_send_action if { tool_name == "send_email" }
 is_send_action if { tool_name == "gmail_send_email" }
 
@@ -194,6 +236,28 @@ is_allowed_recipient(addr) if {
 # -------------------------
 # Deny logic
 # -------------------------
+
+deny_reasons contains reason if {
+  is_send_action
+  normalized_recipients[recipient]
+  teams_data := data.teams
+  soc_team := object.get(teams_data, "soc_team", {})
+  members := object.get(soc_team, "members", [])
+  members[_] == recipient
+  not is_within_business_hours
+  reason := sprintf("soc_team_email_outside_business_hours:%s", [recipient])
+}
+
+deny_reasons contains reason if {
+  is_send_action
+  normalized_recipients[recipient]
+  teams_data := data.teams
+  soc_team := object.get(teams_data, "soc_team", {})
+  members := object.get(soc_team, "members", [])
+  members[_] == recipient
+  not requester_has_role("soc_analyst")
+  reason := sprintf("soc_analyst_role_required_to_email_soc_team:%s", [recipient])
+}
 
 deny_reasons contains reason if {
   is_send_action
