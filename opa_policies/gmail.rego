@@ -55,16 +55,14 @@ requester_identity := lower(trim_ws(
 # -------------------------
 
 user_has_role(user_id, role_name) if {
-  roles_data := data.user_roles
-  roles_array := object.get(roles_data, "roles", [])
+  roles_array := object.get(cfg.user_roles, "roles", [])
   role := roles_array[_]
   role.name == role_name
   role.members[_] == user_id
 }
 
 requester_roles contains role.name if {
-  roles_data := data.user_roles
-  roles_array := object.get(roles_data, "roles", [])
+  roles_array := object.get(cfg.user_roles, "roles", [])
   role := roles_array[_]
   role.members[_] == requester_identity
 }
@@ -240,8 +238,7 @@ is_allowed_recipient(addr) if {
 deny_reasons contains reason if {
   is_send_action
   normalized_recipients[recipient]
-  teams_data := data.teams
-  soc_team := object.get(teams_data, "soc_team", {})
+  soc_team := object.get(cfg.teams, "soc_team", {})
   members := object.get(soc_team, "members", [])
   members[_] == recipient
   not is_within_business_hours
@@ -251,8 +248,7 @@ deny_reasons contains reason if {
 deny_reasons contains reason if {
   is_send_action
   normalized_recipients[recipient]
-  teams_data := data.teams
-  soc_team := object.get(teams_data, "soc_team", {})
+  soc_team := object.get(cfg.teams, "soc_team", {})
   members := object.get(soc_team, "members", [])
   members[_] == recipient
   not requester_has_role("soc_analyst")

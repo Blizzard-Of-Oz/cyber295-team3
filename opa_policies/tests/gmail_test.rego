@@ -187,7 +187,7 @@ test_non_send_action_is_not_blocked if {
 # -------------------------
 
 test_soc_analyst_role_exists if {
-  roles := data.user_roles.roles
+  roles := data.config.user_roles.roles
   count([r | r := roles[_]; r.name == "soc_analyst"]) > 0
 }
 
@@ -219,7 +219,7 @@ test_requester_has_soc_analyst_role if {
 # -------------------------
 
 test_soc_team_exists if {
-  soc_team := data.teams.soc_team
+  soc_team := data.config.teams.soc_team
   soc_team.members
 }
 

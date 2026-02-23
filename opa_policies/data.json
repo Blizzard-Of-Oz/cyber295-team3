@@ -25,25 +25,25 @@
     "business_hours": {
       "start_hour": 9,
       "end_hour": 18
-    }
-  },
-  "user_roles": {
-    "roles": [
-      {
-        "name": "soc_analyst",
-        "description": "Security Operations Center Analyst",
+    },
+    "user_roles": {
+      "roles": [
+        {
+          "name": "soc_analyst",
+          "description": "Security Operations Center Analyst",
+          "members": [
+            "team3@billyyaoischoolberkeley.onmicrosoft.com"
+          ]
+        }
+      ]
+    },
+    "teams": {
+      "soc_team": {
+        "description": "Security Operations Center Team",
         "members": [
-          "team3@billyyaoischoolberkeley.onmicrosoft.com"
+          "member1@billyyaoischoolberkeley.onmicrosoft.com"
         ]
       }
-    ]
-  },
-  "teams": {
-    "soc_team": {
-      "description": "Security Operations Center Team",
-      "members": [
-        "member1@billyyaoischoolberkeley.onmicrosoft.com"
-      ]
     }
   }
 }
