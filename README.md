@@ -8,135 +8,71 @@ It is built on top of the **Gmail MCP Server**:
 https://github.com/fldc/Gmail-MCP-Server.git, which is a fork from
 https://github.com/GongRzhe/Gmail-MCP-Server
 
-### Architecture Overview
+## Architecture Overview
 
-- **MCP Server Base**  
+- **MCP Server Base**
   The core functionality comes from the Gmail MCP Server.
+- **HTTP Wrapper**
+  - Exposes MCP capabilities via HTTP APIs
+  - Writes audit logs to immuDB
+  - Enforces OPA policy through `POST /v1/data/gmail/decision`
+- **OPA policy package (`opa-policies`)**
+  - Returns compatible `allow` + `reason`
+  - Also returns enriched metadata: `decision`, `reasons`, `risk`, `actions`, `cooldown_seconds`, `triggered_controls`
+- **Web UI / AI Agent / MCP Client**
+  - Interactive UI
+  - Agent orchestration for tool use
 
-- **HTTP Wrapper**  
-  An HTTP wrapper is added on top of the MCP server to:
-  - Expose MCP capabilities via HTTP APIs  
-  - Extend functionality beyond the base MCP server  
-  - Write audit logs to a database
-  - Policy Enforcement
-    An **OPA (Open Policy Agent) policy server** is integrated. The request will be evaluated based on the policies in opa-polices folder
+## Demo Story Runner (SOC Analyst scenarios)
 
-- **Web UI / AI Agent / MCP Client**  
-  The Web UI acts as:
-  - An interactive user interface  
-  - The AI agent that interprets user intent  
-  - An MCP client that communicates with the MCP server via the HTTP wrapper  
-  - The orchestration layer by calling the OpenAI API to plan and execute actions
+Run all 4 demo scenarios against the wrapper:
 
-### Summary
+```bash
+scripts/demo_scenarios.sh
+```
 
-The project combines:
-- Gmail MCP Server  
-- A custom HTTP wrapper with auditing  
-- A Web UI that functions as the AI agent, MCP client, and orchestration layer using the OpenAI API  
-- Policy enforcement via OPA  
+The script calls `POST /demo/scenarios/:id` and exercises:
+1. **Scenario 1** ALLOW: internal team email in working hours.
+2. **Scenario 2** DENY: company-wide send denied for `soc_analyst`.
+3. **Scenario 3** DENY + ALERT: urgency + prompt injection + external exfil indicators.
+4. **Scenario 4** DENY + ALERT + LOCK: after-hours bulk confidential export by departing employee.
 
-## How to setup development environment locally
-Before starting the application components, ensure the following services are installed and running:
-### 0. Prerequisites
+After scenario 4, a follow-up request for `marcus@company.com` is denied as **account locked** until reset.
 
-  - OPA + OPAL
+Reset a locked account (demo):
 
-    The easiest way to set up OPA and OPAL is via Docker Compose.
+```bash
+curl -X POST http://localhost:5001/demo/reset-lock/marcus@company.com
+```
 
-    Follow the official quickstart guide:
-    https://docs.opal.ac/getting-started/quickstart/opal-playground/run-server-and-client
+## OPA policy config
 
-    After cloning the OPAL Docker Compose setup, modify the OPAL server environment variables to point to this policy repository:
+Policy configuration is centralized in:
 
-    ```
-      - OPAL_POLICY_REPO_URL=https://github.com/yaoyaozong/cyber295-team3.git
-      - OPAL_POLICY_REPO_MAIN_BRANCH=main
-      - OPAL_POLICY_SUBSCRIPTION_DIRS=opa_policies
-      - OPAL_BUNDLE_IGNORE=**/*_test.rego
-    ```
-    Make sure OPAL is running and successfully syncing policies before proceeding.
+- `opa-policies/data.json`
 
-  - immuDB
+Edit this file to tune:
+- business hours
+- role recipient limits
+- broadcast patterns + allowed roles
+- urgency/injection settings
+- personal domains / exfil controls
+- demo user profile map
 
-    Download and run immuDB locally by following the official documentation:
-    https://docs.immudb.io/master/running/download
-    
-    Ensure immuDB is running and accessible from your local environment.
+## Audit & alerts in log viewer
 
-  - Microsoft Entra ID (Authentication)
+Use the log viewer to inspect:
+- policy decisions (`mcp_policy_decisions` or `mcp-policy:`)
+- actions (`mcp_actions` or `mcp-action:`)
+- alerts (`mcp_alerts` or `mcp-alert:`)
 
-    You will need:
-    - Azure Tenant ID
-    - Client ID
-    - Client Secret
+Each policy decision records request ID, decision, reasons, triggered controls, and policy version.
 
-    Make sure your application registration is properly configured in Entra ID.
+## OPA tests (Docker)
 
-### 1. WebUI and Agent
-  - Step 1: Create Environment File
+```bash
+docker run --rm -v "$PWD:/work" -w /work openpolicyagent/opa:latest test opa-policies -v
+```
 
-    ```
-    cd agent-ui
-    cp .env.example .env
-    ```
-
-  - Step 2: Configure Environment Variables
-
-    Edit the `.env` file and configure the following:
-
-    ```env
-    OPENAI_API_KEY=your_openai_key
-    AZURE_TENANT_ID=your-tenant-id
-    AZURE_CLIENT_ID=your-client-id
-    AZURE_CLIENT_SECRET=your-client-secret
-    ```
-  - Step 3: Install Dependencies and Start
-
-    ```bash
-    npm install
-    npm start
-    ```
-
-  The Web UI and Agent should now be running locally.
-
-### 2. HTTP Wrapper and MCP server
-  - Build GMAIL MCP server
-    ```
-    # Fetch code for submodule
-    git submodule update --init --recursive
-
-    # Build GMAIL MCP server
-    cd mcp-server/gmail
-    npm install
-    npm run build
-    ```
-
-  - Build and run HTTP Wrapper
-    ```
-    cd gmail-mcp-http
-    cp .env.example .env
-    ```
-
-    Modify the created `.env` file to match the local immuDB and OPA setup. 
-    
-    Then install dependenicies and start 
-
-    ```
-    npm install
-    npm start
-    ```
-### 3. Logviewer
-
-  ```
-  cd logviewer
-  cp .env.example .env
-  ```
-
-  Modify the created .env file to match the local immuDB setup. Then install dependenicies and start 
-  
-  ```
-  npm install
-  npm start
-  ```
+This includes one test per demo scenario.
 

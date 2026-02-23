@@ -3,7 +3,7 @@ let autoRefreshInterval = null;
 let autoRefreshEnabled = false;
 let healthInterval = null;
 let sqlTables = [];
-let kvPrefixes = ["mcp-action:", "mcp-policy:"];
+let kvPrefixes = ["mcp-action:", "mcp-policy:", "mcp-alert:"];
 
 function getApiUrl(endpoint) {
   const url = new URL(`./api${endpoint}`, window.location.href);
@@ -266,6 +266,18 @@ function showDetailsModal(log) {
 
   if (log.reason) {
     html += `<div class="detail-row"><strong>Reason:</strong> <span>${escapeHtml(log.reason)}</span></div>`;
+  }
+
+  if (log.requestId) {
+    html += `<div class="detail-row"><strong>Request ID:</strong> <span>${escapeHtml(log.requestId)}</span></div>`;
+  }
+
+  if (log.policyVersion) {
+    html += `<div class="detail-row"><strong>Policy Version:</strong> <span>${escapeHtml(log.policyVersion)}</span></div>`;
+  }
+
+  if (log.risk) {
+    html += `<div class="detail-row"><strong>Risk:</strong> <span>${escapeHtml(log.risk)}</span></div>`;
   }
 
   if (log.status) {
