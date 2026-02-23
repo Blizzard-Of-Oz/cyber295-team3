@@ -8,31 +8,70 @@ It is built on top of the **Gmail MCP Server**:
 https://github.com/fldc/Gmail-MCP-Server.git, which is a fork from
 https://github.com/GongRzhe/Gmail-MCP-Server
 
-### Architecture Overview
+## Architecture Overview
 
-- **MCP Server Base**  
+- **MCP Server Base**
   The core functionality comes from the Gmail MCP Server.
+- **HTTP Wrapper**
+  - Exposes MCP capabilities via HTTP APIs
+  - Writes audit logs to immuDB
+  - Enforces OPA policy through `POST /v1/data/gmail/decision`
+- **OPA policy package (`opa-policies`)**
+  - Returns compatible `allow` + `reason`
+  - Also returns enriched metadata: `decision`, `reasons`, `risk`, `actions`, `cooldown_seconds`, `triggered_controls`
+- **Web UI / AI Agent / MCP Client**
+  - Interactive UI
+  - Agent orchestration for tool use
 
-- **HTTP Wrapper**  
-  An HTTP wrapper is added on top of the MCP server to:
-  - Expose MCP capabilities via HTTP APIs  
-  - Extend functionality beyond the base MCP server  
-  - Write audit logs to a database
-  - Policy Enforcement
-    An **OPA (Open Policy Agent) policy server** is integrated. The request will be evaluated based on the policies in opa-polices folder
+## Demo Story Runner (SOC Analyst scenarios)
 
-- **Web UI / AI Agent / MCP Client**  
-  The Web UI acts as:
-  - An interactive user interface  
-  - The AI agent that interprets user intent  
-  - An MCP client that communicates with the MCP server via the HTTP wrapper  
-  - The orchestration layer by calling the OpenAI API to plan and execute actions
+Run all 4 demo scenarios against the wrapper:
 
-### Summary
+```bash
+scripts/demo_scenarios.sh
+```
 
-The project combines:
-- Gmail MCP Server  
-- A custom HTTP wrapper with auditing  
-- A Web UI that functions as the AI agent, MCP client, and orchestration layer using the OpenAI API  
-- Policy enforcement via OPA  
+The script calls `POST /demo/scenarios/:id` and exercises:
+1. **Scenario 1** ALLOW: internal team email in working hours.
+2. **Scenario 2** DENY: company-wide send denied for `soc_analyst`.
+3. **Scenario 3** DENY + ALERT: urgency + prompt injection + external exfil indicators.
+4. **Scenario 4** DENY + ALERT + LOCK: after-hours bulk confidential export by departing employee.
 
+After scenario 4, a follow-up request for `marcus@company.com` is denied as **account locked** until reset.
+
+Reset a locked account (demo):
+
+```bash
+curl -X POST http://localhost:5001/demo/reset-lock/marcus@company.com
+```
+
+## OPA policy config
+
+Policy configuration is centralized in:
+
+- `opa-policies/data.json`
+
+Edit this file to tune:
+- business hours
+- role recipient limits
+- broadcast patterns + allowed roles
+- urgency/injection settings
+- personal domains / exfil controls
+- demo user profile map
+
+## Audit & alerts in log viewer
+
+Use the log viewer to inspect:
+- policy decisions (`mcp_policy_decisions` or `mcp-policy:`)
+- actions (`mcp_actions` or `mcp-action:`)
+- alerts (`mcp_alerts` or `mcp-alert:`)
+
+Each policy decision records request ID, decision, reasons, triggered controls, and policy version.
+
+## OPA tests (Docker)
+
+```bash
+docker run --rm -v "$PWD:/work" -w /work openpolicyagent/opa:latest test opa-policies -v
+```
+
+This includes one test per demo scenario.
