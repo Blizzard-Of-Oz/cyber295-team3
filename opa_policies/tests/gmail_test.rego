@@ -268,7 +268,7 @@ test_allow_sendemail_to_soc_team_with_soc_analyst_role if {
         "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com"
       }
     },
-    "timestamp": 50400000000000
+    "timestamp": 1771906784000000000
   }
 
   data.gmail.allow with input as inp
@@ -292,7 +292,7 @@ test_deny_sendemail_to_soc_team_outside_business_hours_soc_analyst if {
         "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com"
       }
     },
-    "timestamp": 14400000000000
+    "timestamp": 28800000000000
   }
 
   not data.gmail.allow with input as inp

@@ -91,7 +91,7 @@ current_hour := hour if {
   # Explicit timestamp provided - treat as UTC
   timestamp := input.timestamp
   ns_per_hour := 3600000000000
-  hours_since_epoch := timestamp / ns_per_hour
+  hours_since_epoch := floor(timestamp / ns_per_hour)
   hour := hours_since_epoch % 24
 }
 
@@ -100,19 +100,48 @@ current_hour := hour if {
   not input.timestamp
   timestamp := time.now_ns()
   ns_per_hour := 3600000000000
-  hours_since_epoch := timestamp / ns_per_hour
-  utc_hour := hours_since_epoch % 24
-  timezone_string := object.get(cfg.business_hours, "timezone", "UTC+0")
-  timezone_offset := parse_timezone_offset(timezone_string)
-  hour := (utc_hour + timezone_offset + 24) % 24
+  hours_since_epoch := floor(timestamp / ns_per_hour)
+  hour := hours_since_epoch % 24
 }
 
 is_within_business_hours if {
   business_hours := cfg.business_hours
   start_hour := object.get(business_hours, "start_hour", 9)
   end_hour := object.get(business_hours, "end_hour", 18)
-  current_hour >= start_hour
-  current_hour < end_hour
+  timezone_string := object.get(business_hours, "timezone", "UTC+0")
+  timezone_offset := parse_timezone_offset(timezone_string)
+  start_hour_utc := (start_hour - timezone_offset + 24) % 24
+  end_hour_utc := (end_hour - timezone_offset + 24) % 24
+  # Handle both normal and wrap-around ranges after UTC conversion.
+  start_hour_utc < end_hour_utc
+  current_hour >= start_hour_utc
+  current_hour < end_hour_utc
+}
+
+is_within_business_hours if {
+  business_hours := cfg.business_hours
+  start_hour := object.get(business_hours, "start_hour", 9)
+  end_hour := object.get(business_hours, "end_hour", 18)
+  timezone_string := object.get(business_hours, "timezone", "UTC+0")
+  timezone_offset := parse_timezone_offset(timezone_string)
+  start_hour_utc := (start_hour - timezone_offset + 24) % 24
+  end_hour_utc := (end_hour - timezone_offset + 24) % 24
+  # Wrap-around window (e.g., 22 -> 6).
+  start_hour_utc >= end_hour_utc
+  current_hour >= start_hour_utc
+}
+
+is_within_business_hours if {
+  business_hours := cfg.business_hours
+  start_hour := object.get(business_hours, "start_hour", 9)
+  end_hour := object.get(business_hours, "end_hour", 18)
+  timezone_string := object.get(business_hours, "timezone", "UTC+0")
+  timezone_offset := parse_timezone_offset(timezone_string)
+  start_hour_utc := (start_hour - timezone_offset + 24) % 24
+  end_hour_utc := (end_hour - timezone_offset + 24) % 24
+  # Wrap-around window (e.g., 22 -> 6).
+  start_hour_utc >= end_hour_utc
+  current_hour < end_hour_utc
 }
 
 is_send_action if { tool_name == "send_email" }
