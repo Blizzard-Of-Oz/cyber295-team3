@@ -16,380 +16,273 @@ cfg := c if {
 
 default allow = false
 
-default decision = {
-  "allow": false,
-  "decision": "DENY",
-  "reason": "missing_decision",
-  "reasons": ["missing_decision"],
-  "risk": "high"
+default decision_outcome = "DENY"
+default risk = "medium"
+default cooldown_seconds = 0
+
+policy_version := object.get(data, "policy_version", "v1")
+
+requester_role := object.get(input.requester, "role", "unknown")
+requester_identity := lower(object.get(input.requester, "identity", "unknown"))
+
+recipient_count := object.get(input.context, "recipient_count", 0)
+is_companywide := object.get(input.context, "is_companywide", false)
+is_working_hours := object.get(input.context, "is_working_hours", true)
+urgency_score := object.get(input.context, "urgency_score", 0)
+has_prompt_injection := object.get(input.context, "has_prompt_injection", false)
+attachment_bytes := object.get(input.context, "attachment_bytes", 0)
+data_classification := object.get(input.context, "data_classification", "none")
+employment_status := object.get(input.context, "employment_status", "active")
+record_count := object.get(input.context, "record_count", 0)
+
+recipients := object.get(input.context, "recipients", [])
+recipient_domains := object.get(input.context, "recipient_domains", [])
+
+any_personal_domain {
+  some d in recipient_domains
+  d in data.personal_domains
 }
 
-# -------------------------
-# Helpers
-# -------------------------
-
-trim_ws(s) = out if {
-  out := trim(sprintf("%v", [s]), " \t\r\n")
+any_external_domain {
+  some d in recipient_domains
+  not d in data.internal_domains
 }
 
-tool := object.get(input, "tool", {})
-request := object.get(input, "request", {})
-request_body := object.get(request, "body", {})
-request_headers := object.get(request, "headers", {})
-
-raw_tool_name := object.get(tool, "name", object.get(request_body, "name", ""))
-tool_name := lower(trim_ws(raw_tool_name))
-
-tool_args := object.get(tool, "arguments", object.get(request_body, "arguments", {}))
-
-requester_identity := lower(trim_ws(
-  object.get(
-    object.get(input, "requester", {}),
-    "identity",
-    object.get(request_headers, "x-authenticated-user", "")
-  )
-))
-
-# -------------------------
-# Role-based access control
-# -------------------------
-
-user_has_role(user_id, role_name) if {
-  roles_array := object.get(cfg.user_roles, "roles", [])
-  role := roles_array[_]
-  role.name == role_name
-  role.members[_] == user_id
+trusted_sender {
+  requester_identity in data.trusted_senders
 }
 
-requester_roles contains role.name if {
-  roles_array := object.get(cfg.user_roles, "roles", [])
-  role := roles_array[_]
-  role.members[_] == requester_identity
+role_limit := object.get(data.role_recipient_limits, requester_role, 25)
+
+recipient_limit_exceeded {
+  recipient_count > role_limit
 }
 
-requester_has_role(role_name) if {
-  requester_roles[role_name]
+broadcast_privilege_denied {
+  is_companywide
+  not requester_role in data.broadcast_allowed_roles
 }
 
-# -------------------------
-# Business hours check
-# -------------------------
-
-# Parse timezone string like "UTC-8" or "UTC+8" to numeric offset
-parse_timezone_offset(tz_string) = offset if {
-  startswith(tz_string, "UTC")
-  tz_part := substring(tz_string, 3, -1)
-  # Handle negative offset like "-6"
-  offset := to_number(tz_part)
+blocked_external_recipient {
+  some r in recipients
+  rr := lower(r)
+  contains(rr, "@")
+  not rr in data.allowed_external_emails
+  parts := split(rr, "@")
+  domain := parts[count(parts)-1]
+  not domain in data.internal_domains
 }
 
-parse_timezone_offset(tz_string) = 0 if {
-  not startswith(tz_string, "UTC")
+after_hours_bulk_exfil {
+  not is_working_hours
+  any_personal_domain
+  attachment_bytes > data.after_hours_attachment_limit_bytes
 }
 
-current_hour := hour if {
-  # Explicit timestamp provided - treat as UTC
-  timestamp := input.timestamp
-  ns_per_hour := 3600000000000
-  hours_since_epoch := timestamp / ns_per_hour
-  hour := hours_since_epoch % 24
+departing_employee_exfil {
+  employment_status == "notice_period"
+  any_personal_domain
+  (data_classification == "confidential" or attachment_bytes > 0)
 }
 
-current_hour := hour if {
-  # No timestamp provided - use current time with timezone offset
-  not input.timestamp
-  timestamp := time.now_ns()
-  ns_per_hour := 3600000000000
-  hours_since_epoch := timestamp / ns_per_hour
-  utc_hour := hours_since_epoch % 24
-  timezone_string := object.get(cfg.business_hours, "timezone", "UTC+0")
-  timezone_offset := parse_timezone_offset(timezone_string)
-  hour := (utc_hour + timezone_offset + 24) % 24
+bulk_customer_export {
+  data_classification == "confidential"
+  record_count >= 100
 }
 
-is_within_business_hours if {
-  business_hours := cfg.business_hours
-  start_hour := object.get(business_hours, "start_hour", 9)
-  end_hour := object.get(business_hours, "end_hour", 18)
-  current_hour >= start_hour
-  current_hour < end_hour
+high_urgency_untrusted {
+  urgency_score >= data.urgency_threshold
+  not trusted_sender
 }
 
-is_send_action if { tool_name == "send_email" }
-is_send_action if { tool_name == "gmail_send_email" }
-
-# -------------------------
-# Recipient extraction
-# -------------------------
-
-recipient_candidates contains val if {
-  to_value := object.get(tool_args, "to", null)
-  is_array(to_value)
-  val := to_value[_]
+triggered_controls[c] {
+  high_urgency_untrusted
+  c := "urgency_throttle_triggered"
 }
 
-recipient_candidates contains val if {
-  to_value := object.get(tool_args, "to", null)
-  is_string(to_value)
-  val := to_value
+triggered_controls[c] {
+  has_prompt_injection
+  c := "prompt_injection_detected"
 }
 
-recipient_candidates contains val if {
-  cc_value := object.get(tool_args, "cc", null)
-  is_array(cc_value)
-  val := cc_value[_]
+triggered_controls[c] {
+  blocked_external_recipient
+  c := "external_recipient_not_approved"
 }
 
-recipient_candidates contains val if {
-  cc_value := object.get(tool_args, "cc", null)
-  is_string(cc_value)
-  val := cc_value
+triggered_controls[c] {
+  broadcast_privilege_denied
+  c := "broadcast_requires_privileged_role"
 }
 
-recipient_candidates contains val if {
-  bcc_value := object.get(tool_args, "bcc", null)
-  is_array(bcc_value)
-  val := bcc_value[_]
+triggered_controls[c] {
+  recipient_limit_exceeded
+  c := "recipient_limit_exceeded"
 }
 
-recipient_candidates contains val if {
-  bcc_value := object.get(tool_args, "bcc", null)
-  is_string(bcc_value)
-  val := bcc_value
+triggered_controls[c] {
+  after_hours_bulk_exfil
+  c := "after_hours_bulk_exfil_attempt"
 }
 
-recipient_candidates contains val if {
-  message := object.get(tool_args, "message", {})
-  to_value := object.get(message, "to", null)
-  is_array(to_value)
-  val := to_value[_]
+triggered_controls[c] {
+  departing_employee_exfil
+  c := "notice_period_protection"
 }
 
-recipient_candidates contains val if {
-  message := object.get(tool_args, "message", {})
-  to_value := object.get(message, "to", null)
-  is_string(to_value)
-  val := to_value
+triggered_controls[c] {
+  bulk_customer_export
+  c := "bulk_customer_export_detected"
 }
 
-recipient_candidates contains val if {
-  message := object.get(tool_args, "message", {})
-  cc_value := object.get(message, "cc", null)
-  is_array(cc_value)
-  val := cc_value[_]
+deny_reasons[r] {
+  has_prompt_injection
+  r := "Prompt injection pattern \"IGNORE PREVIOUS INSTRUCTIONS\" detected."
 }
 
-recipient_candidates contains val if {
-  message := object.get(tool_args, "message", {})
-  cc_value := object.get(message, "cc", null)
-  is_string(cc_value)
-  val := cc_value
+deny_reasons[r] {
+  blocked_external_recipient
+  r := "External recipient is not approved."
 }
 
-recipient_candidates contains val if {
-  message := object.get(tool_args, "message", {})
-  bcc_value := object.get(message, "bcc", null)
-  is_array(bcc_value)
-  val := bcc_value[_]
+deny_reasons[r] {
+  broadcast_privilege_denied
+  r := "Insufficient privileges for company-wide email."
 }
 
-recipient_candidates contains val if {
-  message := object.get(tool_args, "message", {})
-  bcc_value := object.get(message, "bcc", null)
-  is_string(bcc_value)
-  val := bcc_value
+deny_reasons[r] {
+  recipient_limit_exceeded
+  r := sprintf("Recipient count exceeds limit for role %s.", [requester_role])
 }
 
-normalized_recipients contains addr if {
-  is_send_action
-  raw := recipient_candidates[_]
-  trimmed := lower(trim_ws(raw))
-  trimmed != ""
-  addr := trimmed
+deny_reasons[r] {
+  after_hours_bulk_exfil
+  r := "After-hours personal-domain transfer with oversized attachment is blocked."
 }
 
-recipient_count := count(normalized_recipients)
-
-# -------------------------
-# Email content
-# -------------------------
-
-subject := trim_ws(object.get(
-  tool_args,
-  "subject",
-  object.get(object.get(tool_args, "message", {}), "subject", "")
-))
-
-body := sprintf("%v", [
-  object.get(
-    tool_args,
-    "body",
-    object.get(
-      object.get(tool_args, "message", {}),
-      "body",
-      object.get(object.get(tool_args, "message", {}), "text", "")
-    )
-  )
-])
-
-recipient_domain(addr) = domain if {
-  parts := split(addr, "@")
-  count(parts) == 2
-  domain := lower(trim_ws(parts[1]))
+deny_reasons[r] {
+  departing_employee_exfil
+  r := "Departing employee cannot send confidential data or attachments to personal domains."
 }
 
-recipient_domain(addr) = "" if {
-  not contains(addr, "@")
+deny_reasons[r] {
+  bulk_customer_export
+  any_personal_domain
+  r := "Bulk customer records cannot be sent to personal domains."
 }
 
-external_recipient_present if {
-  normalized_recipients[addr]
-  not is_allowed_recipient(addr)
+allow_reasons[r] {
+  r := "Request satisfies role, recipient, domain, and business-hour controls."
 }
 
-is_allowed_recipient(addr) if {
-  domain := recipient_domain(addr)
-  cfg.internal_domains[_] == domain
+throttle_reasons[r] {
+  high_urgency_untrusted
+  r := "High urgency score from untrusted sender; cooling-off period required."
 }
 
-is_allowed_recipient(addr) if {
-  cfg.allowed_external_emails[_] == addr
+decision_outcome = "DENY" {
+  count(deny_reasons) > 0
 }
 
-# -------------------------
-# Deny logic
-# -------------------------
-
-deny_reasons contains reason if {
-  is_send_action
-  normalized_recipients[recipient]
-  soc_team := object.get(cfg.teams, "soc_team", {})
-  members := object.get(soc_team, "members", [])
-  members[_] == recipient
-  not is_within_business_hours
-  reason := sprintf("soc_team_email_outside_business_hours:%s", [recipient])
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  normalized_recipients[recipient]
-  soc_team := object.get(cfg.teams, "soc_team", {})
-  members := object.get(soc_team, "members", [])
-  members[_] == recipient
-  not requester_has_role("soc_analyst")
-  reason := sprintf("soc_analyst_role_required_to_email_soc_team:%s", [recipient])
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  normalized_recipients[recipient]
-  cfg.blocked_recipients[_] == recipient
-  reason := sprintf("blocked_recipient:%s", [recipient])
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  normalized_recipients[recipient]
-  not is_allowed_recipient(recipient)
-  reason := sprintf("external_recipient_not_allowed:%s", [recipient])
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  normalized_recipients[recipient]
-  pattern := cfg.broadcast_patterns[_]
-  regex.match(pattern, recipient)
-  not is_broadcast_privileged
-  reason := sprintf("broadcast_requires_privileged_identity:%s", [recipient])
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  recipient_count > cfg.max_recipients
-  reason := sprintf("max_recipients_exceeded:%d>%d", [recipient_count, cfg.max_recipients])
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  cfg.require_nonempty_subject
-  subject == ""
-  reason := "subject_required"
-}
-
-deny_reasons contains reason if {
-  is_send_action
-  count(body) > cfg.max_body_chars
-  reason := sprintf("body_too_large:%d>%d", [count(body), cfg.max_body_chars])
-}
-
-is_broadcast_privileged if {
-  cfg.broadcast_allowed_identities[_] == requester_identity
-}
-
-# -------------------------
-# Allow logic
-# -------------------------
-
-allow if { not is_send_action }
-
-allow if {
-  is_send_action
+decision_outcome = "THROTTLE" {
   count(deny_reasons) == 0
+  high_urgency_untrusted
 }
 
-# -------------------------
-# Decision computation
-# -------------------------
-
-sorted_reasons := sort([r | deny_reasons[r]])
-
-reason = "ok" if { allow }
-
-reason = sorted_reasons[0] if {
-  count(sorted_reasons) > 0
-}
-
-require_approval if {
-  is_send_action
-  allow
-  recipient_count > 5
-}
-
-require_approval if {
-  is_send_action
-  allow
-  external_recipient_present
-}
-
-risk = "high" if { count(deny_reasons) > 0 }
-
-risk = "medium" if {
+decision_outcome = "ALLOW" {
   count(deny_reasons) == 0
-  is_send_action
-  require_approval
+  not high_urgency_untrusted
 }
 
-risk = "low" if {
-  count(deny_reasons) == 0
-  not require_approval
+allow {
+  decision_outcome == "ALLOW"
 }
 
-decision_label = "DENY" if { not allow }
-
-decision_label = "REQUIRE_APPROVAL" if {
-  allow
-  require_approval
+reasons := rs {
+  decision_outcome == "DENY"
+  rs := sort([r | deny_reasons[r]])
 }
 
-decision_label = "ALLOW" if {
-  allow
-  not require_approval
+reasons := rs {
+  decision_outcome == "THROTTLE"
+  rs := sort([r | throttle_reasons[r]])
+}
+
+reasons := rs {
+  decision_outcome == "ALLOW"
+  rs := ["Allowed by policy"]
+}
+
+reason := r {
+  some x in reasons
+  r := x
+}
+
+reason := "Denied by policy" {
+  decision_outcome == "DENY"
+  count(reasons) == 0
+}
+
+reason := "cooling-off period required" {
+  decision_outcome == "THROTTLE"
+  count(reasons) == 0
+}
+
+risk = "high" {
+  decision_outcome == "DENY"
+}
+
+risk = "medium" {
+  decision_outcome == "THROTTLE"
+}
+
+risk = "low" {
+  decision_outcome == "ALLOW"
+}
+
+cooldown_seconds = data.throttle_seconds {
+  decision_outcome == "THROTTLE"
+}
+
+actions[a] {
+  decision_outcome == "DENY"
+  (has_prompt_injection or blocked_external_recipient)
+  a := "ALERT_SECURITY"
+}
+
+actions[a] {
+  decision_outcome == "DENY"
+  (after_hours_bulk_exfil or departing_employee_exfil)
+  a := "ALERT_SECURITY"
+}
+
+actions[a] {
+  decision_outcome == "DENY"
+  (after_hours_bulk_exfil or departing_employee_exfil)
+  a := "LOCK_ACCOUNT"
+}
+
+actions[a] {
+  decision_outcome == "DENY"
+  departing_employee_exfil
+  a := "MANAGER_LEGAL_REVIEW"
 }
 
 decision = {
   "allow": allow,
+<<<<<<< HEAD
   "decision": decision_label,
   "reason": reason,
   "reasons": sorted_reasons,
   "risk": risk
+=======
+  "reason": reason,
+  "decision": decision_outcome,
+  "reasons": reasons,
+  "actions": sort([a | actions[a]]),
+  "cooldown_seconds": cooldown_seconds,
+  "risk": risk,
+  "policy_version": policy_version,
+  "triggered_controls": sort([c | triggered_controls[c]])
+>>>>>>> 23dcc24 (sync new folder struct from main)
 }
