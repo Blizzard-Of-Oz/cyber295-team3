@@ -1,9 +1,9 @@
-package gmail
+package gmail_test
 
 import future.keywords
 
-test_scenario_1_allow_team_email {
-  input := {
+test_scenario_1_allow_team_email if {
+  test_input := {
     "requester": {"identity": "maya@company.com", "role": "soc_analyst"},
     "context": {
       "recipient_count": 2,
@@ -20,13 +20,13 @@ test_scenario_1_allow_team_email {
     }
   }
 
-  result := data.gmail.decision with input as input
+  result := data.gmail.decision with input as test_input
   result.allow
   result.decision == "ALLOW"
 }
 
-test_scenario_2_deny_companywide_for_soc {
-  input := {
+test_scenario_2_deny_companywide_for_soc if {
+  test_input := {
     "requester": {"identity": "maya@company.com", "role": "soc_analyst"},
     "context": {
       "recipient_count": 1,
@@ -43,14 +43,14 @@ test_scenario_2_deny_companywide_for_soc {
     }
   }
 
-  result := data.gmail.decision with input as input
+  result := data.gmail.decision with input as test_input
   not result.allow
   result.decision == "DENY"
   result.reason == "Insufficient privileges for company-wide email."
 }
 
-test_scenario_3_deny_prompt_injection_and_alert {
-  input := {
+test_scenario_3_deny_prompt_injection_and_alert if {
+  test_input := {
     "requester": {"identity": "maya@company.com", "role": "soc_analyst"},
     "context": {
       "recipient_count": 3,
@@ -67,7 +67,7 @@ test_scenario_3_deny_prompt_injection_and_alert {
     }
   }
 
-  result := data.gmail.decision with input as input
+  result := data.gmail.decision with input as test_input
   not result.allow
   result.decision == "DENY"
   "ALERT_SECURITY" in result.actions
@@ -75,8 +75,8 @@ test_scenario_3_deny_prompt_injection_and_alert {
   "prompt_injection_detected" in result.triggered_controls
 }
 
-test_scenario_4_deny_after_hours_insider_and_lock {
-  input := {
+test_scenario_4_deny_after_hours_insider_and_lock if {
+  test_input := {
     "requester": {"identity": "marcus@company.com", "role": "soc_analyst"},
     "context": {
       "recipient_count": 1,
@@ -93,7 +93,7 @@ test_scenario_4_deny_after_hours_insider_and_lock {
     }
   }
 
-  result := data.gmail.decision with input as input
+  result := data.gmail.decision with input as test_input
   not result.allow
   result.decision == "DENY"
   "LOCK_ACCOUNT" in result.actions

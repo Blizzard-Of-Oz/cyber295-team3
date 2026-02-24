@@ -20,8 +20,6 @@ default decision_outcome = "DENY"
 default risk = "medium"
 default cooldown_seconds = 0
 
-policy_version := object.get(data, "policy_version", "v1")
-
 requester_role := object.get(input.requester, "role", "unknown")
 requester_identity := lower(object.get(input.requester, "identity", "unknown"))
 
@@ -38,32 +36,32 @@ record_count := object.get(input.context, "record_count", 0)
 recipients := object.get(input.context, "recipients", [])
 recipient_domains := object.get(input.context, "recipient_domains", [])
 
-any_personal_domain {
+any_personal_domain if {
   some d in recipient_domains
   d in data.personal_domains
 }
 
-any_external_domain {
+any_external_domain if {
   some d in recipient_domains
   not d in data.internal_domains
 }
 
-trusted_sender {
+trusted_sender if {
   requester_identity in data.trusted_senders
 }
 
 role_limit := object.get(data.role_recipient_limits, requester_role, 25)
 
-recipient_limit_exceeded {
+recipient_limit_exceeded if {
   recipient_count > role_limit
 }
 
-broadcast_privilege_denied {
+broadcast_privilege_denied if {
   is_companywide
   not requester_role in data.broadcast_allowed_roles
 }
 
-blocked_external_recipient {
+blocked_external_recipient if {
   some r in recipients
   rr := lower(r)
   contains(rr, "@")
@@ -73,196 +71,220 @@ blocked_external_recipient {
   not domain in data.internal_domains
 }
 
-after_hours_bulk_exfil {
+after_hours_bulk_exfil if {
   not is_working_hours
   any_personal_domain
   attachment_bytes > data.after_hours_attachment_limit_bytes
 }
 
-departing_employee_exfil {
+departing_employee_exfil if {
   employment_status == "notice_period"
   any_personal_domain
-  (data_classification == "confidential" or attachment_bytes > 0)
+  data_classification == "confidential"
 }
 
-bulk_customer_export {
+departing_employee_exfil if {
+  employment_status == "notice_period"
+  any_personal_domain
+  attachment_bytes > 0
+}
+
+bulk_customer_export if {
   data_classification == "confidential"
   record_count >= 100
 }
 
-high_urgency_untrusted {
+high_urgency_untrusted if {
   urgency_score >= data.urgency_threshold
   not trusted_sender
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   high_urgency_untrusted
   c := "urgency_throttle_triggered"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   has_prompt_injection
   c := "prompt_injection_detected"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   blocked_external_recipient
   c := "external_recipient_not_approved"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   broadcast_privilege_denied
   c := "broadcast_requires_privileged_role"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   recipient_limit_exceeded
   c := "recipient_limit_exceeded"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   after_hours_bulk_exfil
   c := "after_hours_bulk_exfil_attempt"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   departing_employee_exfil
   c := "notice_period_protection"
 }
 
-triggered_controls[c] {
+triggered_controls[c] if {
   bulk_customer_export
   c := "bulk_customer_export_detected"
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   has_prompt_injection
   r := "Prompt injection pattern \"IGNORE PREVIOUS INSTRUCTIONS\" detected."
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   blocked_external_recipient
   r := "External recipient is not approved."
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   broadcast_privilege_denied
   r := "Insufficient privileges for company-wide email."
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   recipient_limit_exceeded
   r := sprintf("Recipient count exceeds limit for role %s.", [requester_role])
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   after_hours_bulk_exfil
   r := "After-hours personal-domain transfer with oversized attachment is blocked."
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   departing_employee_exfil
   r := "Departing employee cannot send confidential data or attachments to personal domains."
 }
 
-deny_reasons[r] {
+deny_reasons[r] if {
   bulk_customer_export
   any_personal_domain
   r := "Bulk customer records cannot be sent to personal domains."
 }
 
-allow_reasons[r] {
+allow_reasons[r] if {
   r := "Request satisfies role, recipient, domain, and business-hour controls."
 }
 
-throttle_reasons[r] {
+throttle_reasons[r] if {
   high_urgency_untrusted
   r := "High urgency score from untrusted sender; cooling-off period required."
 }
 
-decision_outcome = "DENY" {
+decision_outcome = "DENY" if {
   count(deny_reasons) > 0
 }
 
-decision_outcome = "THROTTLE" {
+decision_outcome = "THROTTLE" if {
   count(deny_reasons) == 0
   high_urgency_untrusted
 }
 
-decision_outcome = "ALLOW" {
+decision_outcome = "ALLOW" if {
   count(deny_reasons) == 0
   not high_urgency_untrusted
 }
 
-allow {
+allow if {
   decision_outcome == "ALLOW"
 }
 
-reasons := rs {
+reasons := rs if {
   decision_outcome == "DENY"
   rs := sort([r | deny_reasons[r]])
 }
 
-reasons := rs {
+reasons := rs if {
   decision_outcome == "THROTTLE"
   rs := sort([r | throttle_reasons[r]])
 }
 
-reasons := rs {
+reasons := rs if {
   decision_outcome == "ALLOW"
   rs := ["Allowed by policy"]
 }
 
-reason := r {
+reason := r if {
   some x in reasons
   r := x
 }
 
-reason := "Denied by policy" {
+reason := "Denied by policy" if {
   decision_outcome == "DENY"
   count(reasons) == 0
 }
 
-reason := "cooling-off period required" {
+reason := "cooling-off period required" if {
   decision_outcome == "THROTTLE"
   count(reasons) == 0
 }
 
-risk = "high" {
+risk = "high" if {
   decision_outcome == "DENY"
 }
 
-risk = "medium" {
+risk = "medium" if {
   decision_outcome == "THROTTLE"
 }
 
-risk = "low" {
+risk = "low" if {
   decision_outcome == "ALLOW"
 }
 
-cooldown_seconds = data.throttle_seconds {
+cooldown_seconds = data.throttle_seconds if {
   decision_outcome == "THROTTLE"
 }
 
-actions[a] {
+actions[a] if {
   decision_outcome == "DENY"
-  (has_prompt_injection or blocked_external_recipient)
+  has_prompt_injection
   a := "ALERT_SECURITY"
 }
 
-actions[a] {
+actions[a] if {
   decision_outcome == "DENY"
-  (after_hours_bulk_exfil or departing_employee_exfil)
+  blocked_external_recipient
   a := "ALERT_SECURITY"
 }
 
-actions[a] {
+actions[a] if {
   decision_outcome == "DENY"
-  (after_hours_bulk_exfil or departing_employee_exfil)
+  after_hours_bulk_exfil
+  a := "ALERT_SECURITY"
+}
+
+actions[a] if {
+  decision_outcome == "DENY"
+  departing_employee_exfil
+  a := "ALERT_SECURITY"
+}
+
+actions[a] if {
+  decision_outcome == "DENY"
+  after_hours_bulk_exfil
   a := "LOCK_ACCOUNT"
 }
 
-actions[a] {
+actions[a] if {
+  decision_outcome == "DENY"
+  departing_employee_exfil
+  a := "LOCK_ACCOUNT"
+}
+
+actions[a] if {
   decision_outcome == "DENY"
   departing_employee_exfil
   a := "MANAGER_LEGAL_REVIEW"
@@ -270,19 +292,12 @@ actions[a] {
 
 decision = {
   "allow": allow,
-<<<<<<< HEAD
-  "decision": decision_label,
-  "reason": reason,
-  "reasons": sorted_reasons,
-  "risk": risk
-=======
-  "reason": reason,
   "decision": decision_outcome,
+  "reason": reason,
   "reasons": reasons,
   "actions": sort([a | actions[a]]),
   "cooldown_seconds": cooldown_seconds,
   "risk": risk,
-  "policy_version": policy_version,
+  "policy_version": "v1",
   "triggered_controls": sort([c | triggered_controls[c]])
->>>>>>> 23dcc24 (sync new folder struct from main)
 }
