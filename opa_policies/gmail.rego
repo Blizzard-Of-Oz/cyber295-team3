@@ -38,19 +38,19 @@ recipient_domains := object.get(input.context, "recipient_domains", [])
 
 any_personal_domain if {
   some d in recipient_domains
-  d in data.personal_domains
+  d in cfg.personal_domains
 }
 
 any_external_domain if {
   some d in recipient_domains
-  not d in data.internal_domains
+  not d in cfg.internal_domains
 }
 
 trusted_sender if {
-  requester_identity in data.trusted_senders
+  requester_identity in cfg.trusted_senders
 }
 
-role_limit := object.get(data.role_recipient_limits, requester_role, 25)
+role_limit := object.get(cfg.role_recipient_limits, requester_role, 25)
 
 recipient_limit_exceeded if {
   recipient_count > role_limit
@@ -58,23 +58,23 @@ recipient_limit_exceeded if {
 
 broadcast_privilege_denied if {
   is_companywide
-  not requester_role in data.broadcast_allowed_roles
+  not requester_role in cfg.broadcast_allowed_roles
 }
 
 blocked_external_recipient if {
   some r in recipients
   rr := lower(r)
   contains(rr, "@")
-  not rr in data.allowed_external_emails
+  not rr in cfg.allowed_external_emails
   parts := split(rr, "@")
   domain := parts[count(parts)-1]
-  not domain in data.internal_domains
+  not domain in cfg.internal_domains
 }
 
 after_hours_bulk_exfil if {
   not is_working_hours
   any_personal_domain
-  attachment_bytes > data.after_hours_attachment_limit_bytes
+  attachment_bytes > cfg.after_hours_attachment_limit_bytes
 }
 
 departing_employee_exfil if {
@@ -95,7 +95,7 @@ bulk_customer_export if {
 }
 
 high_urgency_untrusted if {
-  urgency_score >= data.urgency_threshold
+  urgency_score >= cfg.urgency_threshold
   not trusted_sender
 }
 
@@ -217,9 +217,8 @@ reasons := rs if {
   rs := ["Allowed by policy"]
 }
 
-reason := r if {
-  some x in reasons
-  r := x
+reason := reasons[0] if {
+  count(reasons) > 0
 }
 
 reason := "Denied by policy" if {
@@ -230,6 +229,10 @@ reason := "Denied by policy" if {
 reason := "cooling-off period required" if {
   decision_outcome == "THROTTLE"
   count(reasons) == 0
+}
+
+reason := "Allowed by policy" if {
+  decision_outcome == "ALLOW"
 }
 
 risk = "high" if {
@@ -244,7 +247,7 @@ risk = "low" if {
   decision_outcome == "ALLOW"
 }
 
-cooldown_seconds = data.throttle_seconds if {
+cooldown_seconds = cfg.throttle_seconds if {
   decision_outcome == "THROTTLE"
 }
 
