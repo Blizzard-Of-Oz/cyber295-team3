@@ -1,16 +1,31 @@
 {
   "config": {
-    "internal_domains": ["company.com"],
+    "internal_domains": [
+      "company.com",
+      "ischool.berkeley.edu",
+      "billyyaoischoolberkeley.onmicrosoft.com"
+    ],
     "allowed_external_emails": [],
     "blocked_recipients": [],
-    "broadcast_patterns": ["^all-employees@", "^everyone@", "^all@"],
-    "broadcast_allowed_roles": ["exec", "comms_director"],
+    "broadcast_patterns": [
+      "^all-employees@",
+      "^everyone@",
+      "^all@"
+    ],
+    "broadcast_allowed_roles": [
+      "exec",
+      "comms_director"
+    ],
     "role_recipient_limits": {
       "soc_analyst": 50,
       "exec": 2000,
       "comms_director": 5000
     },
-    "business_hours": { "start": "09:00", "end": "18:00" },
+    "business_hours": {
+      "start_hour": 9,
+      "end_hour": 18,
+      "timezone": "UTC+0"
+    },
     "urgency_keywords": {
       "urgent": 2.0,
       "immediately": 2.0,
@@ -28,7 +43,11 @@
       "forward finance emails"
     ],
     "after_hours_attachment_limit_bytes": 1000000,
-    "personal_domains": ["gmail.com", "outlook.com", "yahoo.com"],
+    "personal_domains": [
+      "gmail.com",
+      "outlook.com",
+      "yahoo.com"
+    ],
     "demo_users": {
       "maya@company.com": {
         "role": "soc_analyst",
@@ -46,7 +65,9 @@
         "days_remaining": 0
       }
     },
-    "trusted_senders": ["ceo@company.com"],
+    "trusted_senders": [
+      "ceo@company.com"
+    ],
     "policy_version": "v2-demo-story"
   }
 }
