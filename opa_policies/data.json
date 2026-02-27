@@ -50,25 +50,25 @@
       "outlook.com",
       "yahoo.com"
     ],
-    "demo_users": {
-      "maya@company.com": {
+    "user_db": {
+      "team3@billyyaoischoolberkeley.onmicrosoft.com": {
         "role": "soc_analyst",
         "employment_status": "active",
         "days_remaining": 0
       },
-      "marcus@company.com": {
-        "role": "soc_analyst",
+      "jdoe@billyyaoischoolberkeley.onmicrosoft.com": {
+        "role": "comms_director",
         "employment_status": "notice_period",
         "days_remaining": 9
       },
-      "ceo@company.com": {
+      "billyyao_ischool.berkeley.edu#EXT#@billyyaoischoolberkeley.onmicrosoft.com": {
         "role": "exec",
         "employment_status": "active",
         "days_remaining": 0
       }
     },
     "trusted_senders": [
-      "ceo@company.com"
+      "team3@billyyaoischoolberkeley.onmicrosoft.com"
     ],
     "policy_version": "v2-demo-story"
   }

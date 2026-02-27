@@ -143,6 +143,16 @@ blocked_external_recipient if {
   not domain in cfg.internal_domains
 }
 
+after_hours_personal_domain if {
+  not is_working_hours
+  some r in recipients
+  rr := lower(r)
+  not rr in cfg.allowed_external_emails
+  parts := split(rr, "@")
+  domain := parts[count(parts)-1]
+  domain in cfg.personal_domains
+}
+
 after_hours_bulk_exfil if {
   not is_working_hours
   any_personal_domain
@@ -197,6 +207,11 @@ triggered_controls[c] if {
 }
 
 triggered_controls[c] if {
+  after_hours_personal_domain
+  c := "after_hours_personal_domain_blocked"
+}
+
+triggered_controls[c] if {
   after_hours_bulk_exfil
   c := "after_hours_bulk_exfil_attempt"
 }
@@ -229,6 +244,11 @@ deny_reasons[r] if {
 deny_reasons[r] if {
   recipient_limit_exceeded
   r := sprintf("Recipient count exceeds limit for role %s.", [requester_role])
+}
+
+deny_reasons[r] if {
+  after_hours_personal_domain
+  r := "Emails to personal domains are not allowed outside business hours."
 }
 
 deny_reasons[r] if {
@@ -337,6 +357,12 @@ actions[a] if {
 
 actions[a] if {
   decision_outcome == "DENY"
+  after_hours_personal_domain
+  a := "ALERT_SECURITY"
+}
+
+actions[a] if {
+  decision_outcome == "DENY"
   after_hours_bulk_exfil
   a := "ALERT_SECURITY"
 }
@@ -373,6 +399,6 @@ decision = {
   "actions": sort([a | actions[a]]),
   "cooldown_seconds": cooldown_seconds,
   "risk": risk,
-  "policy_version": "v1",
+  "policy_version": cfg.policy_version,
   "triggered_controls": sort([c | triggered_controls[c]])
 }
