@@ -39,3 +39,5 @@
 
 # opa cli binary
 opa
+
+opal/**

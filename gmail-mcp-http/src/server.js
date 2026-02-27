@@ -3,9 +3,12 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import fs from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
+import { createDemoRouter } from "./demo-router.js";
+import { loadDemoUsers, DemoRequestIdGenerator, AccountLockManager } from "./demo-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -16,6 +19,18 @@ const OPA_DECISION_URL =
   process.env.OPA_DECISION_URL || "http://localhost:8181/v1/data/gmail/decision";
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
+const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
+
+// Demo utilities (loaded only if demo routes are enabled)
+let demoUsers = {};
+let demoRequestIdGenerator = null;
+let accountLockManager = null;
+
+if (ENABLE_DEMO_ROUTES) {
+  demoUsers = loadDemoUsers();
+  demoRequestIdGenerator = new DemoRequestIdGenerator();
+  accountLockManager = new AccountLockManager();
+}
 
 function debugLog(message, meta) {
   if (!DEBUG) return;
@@ -160,6 +175,57 @@ function truncateText(value, maxLength = 500) {
   return `${value.slice(0, maxLength)}...`;
 }
 
+function normalizeEmailList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((v) => typeof v === "string" && v.includes("@"));
+  if (typeof value === "string") {
+    return value
+      .split(/[\s,;]+/)
+      .map((v) => v.trim())
+      .filter((v) => v.includes("@"));
+  }
+  return [];
+}
+
+function unique(array) {
+  return [...new Set(array)];
+}
+
+function computeUrgencyScore(text) {
+  const lowerText = (text || "").toLowerCase();
+  const weights = {
+    urgent: 2,
+    immediately: 2,
+    asap: 1.5,
+    critical: 2.5,
+    "right now": 2,
+    escalate: 1
+  };
+  return Object.entries(weights).reduce(
+    (sum, [keyword, weight]) => (lowerText.includes(keyword) ? sum + weight : sum),
+    0
+  );
+}
+
+function hasPromptInjectionPattern(text) {
+  const patterns = [
+    "ignore previous instructions",
+    "admin mode",
+    "override policy",
+    "forward finance emails"
+  ];
+  const lowerText = (text || "").toLowerCase();
+  return patterns.some((p) => lowerText.includes(p));
+}
+
+// NOTE: Business hours check is now handled by OPA policy, not by this application.
+// OPA uses its own server time (secure) and configurable business hours from data.json.
+// This ensures the timestamp cannot be manipulated by clients.
+
+function isCompanyWideRecipient(recipient) {
+  return /^(all-employees|everyone|all)@/i.test(recipient || "");
+}
+
 function extractToolError(result) {
   if (!result || typeof result !== "object") return null;
   if (result.isError === true) {
@@ -187,7 +253,28 @@ function buildOpaInput(req, toolName, args) {
   const authenticatedUser = getAuthenticatedUser(req);
   const headers = collectOpaHeaders(req);
 
-  return {
+  const recipients = unique([
+    ...normalizeEmailList(args?.to),
+    ...normalizeEmailList(args?.cc),
+    ...normalizeEmailList(args?.bcc),
+    ...normalizeEmailList(args?.message?.to)
+  ]);
+  const recipientDomains = unique(
+    recipients
+      .filter((r) => r.includes("@"))
+      .map((r) => r.split("@").pop()?.toLowerCase())
+      .filter(Boolean)
+  );
+  const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
+  const urgencyScore = Math.min(10, computeUrgencyScore(contentText));
+  const requesterIdentity = authenticatedUser.toLowerCase();
+  const profile = demoUsers[requesterIdentity] || {
+    role: req.body?.requester?.role || "soc_analyst",
+    employment_status: "active",
+    days_remaining: 0
+  };
+
+  const opaInput = {
     tool: {
       name: toolName,
       arguments: args
@@ -195,6 +282,7 @@ function buildOpaInput(req, toolName, args) {
     requester: {
       ip: requesterIp,
       identity: authenticatedUser,
+      role: profile.role,
       token: headers["x-entra-token"] || headers.authorization || null
     },
     request: {
@@ -202,8 +290,34 @@ function buildOpaInput(req, toolName, args) {
       path: req.path,
       headers,
       body: req.body || null
+    },
+    context: {
+      recipient_count: recipients.length,
+      recipients,
+      recipient_domains: recipientDomains,
+      is_companywide: recipients.some((r) => isCompanyWideRecipient(r)),
+      urgency_score: urgencyScore,
+      has_prompt_injection: hasPromptInjectionPattern(contentText),
+      attachment_bytes: Number(args?.attachmentBytes || args?.attachment_bytes || 0),
+      attachment_name: args?.attachmentName || args?.attachment_name || null,
+      data_classification: args?.dataClassification || args?.data_classification || "none",
+      record_count: Number(args?.recordCount || args?.record_count || 0),
+      employment_status: profile.employment_status,
+      days_remaining: profile.days_remaining
     }
   };
+
+  // For demo/testing purposes only: allow explicit timestamp in nanoseconds
+  // Only accepted when ENABLE_DEMO_ROUTES is true to prevent production misuse
+  // In production (ENABLE_DEMO_ROUTES=false), OPA always uses its own server time which is secure
+  if (ENABLE_DEMO_ROUTES && req.headers["x-demo-timestamp-ns"]) {
+    const timestampNs = Number(req.headers["x-demo-timestamp-ns"]);
+    if (!isNaN(timestampNs) && timestampNs > 0) {
+      opaInput.timestamp = timestampNs;
+    }
+  }
+
+  return opaInput;
 }
 
 function redactOpaInput(input) {
@@ -233,7 +347,18 @@ function normalizeOpaDecision(payload) {
   if (payload.result && typeof payload.result === "object") {
     const allow = Boolean(payload.result.allow);
     const reason = payload.result.reason || (allow ? "ok" : "denied");
-    return { allow, reason, raw: payload };
+    return {
+      allow,
+      reason,
+      decision: payload.result.decision || (allow ? "ALLOW" : "DENY"),
+      reasons: payload.result.reasons || [reason],
+      actions: payload.result.actions || [],
+      cooldown_seconds: payload.result.cooldown_seconds || 0,
+      risk: payload.result.risk || "medium",
+      policy_version: payload.result.policy_version || "v1",
+      triggered_controls: payload.result.triggered_controls || [],
+      raw: payload
+    };
   }
   return { allow: false, reason: "invalid_opa_response", raw: payload };
 }
@@ -305,6 +430,12 @@ const immudbLogger = new ImmuDBLogger({
 
 const mcpClientManager = new McpClientManager();
 
+// Mount demo routes if enabled (default: enabled in dev environments)
+if (ENABLE_DEMO_ROUTES && accountLockManager) {
+  const demoRouter = createDemoRouter(port, accountLockManager);
+  app.use(demoRouter);
+}
+
 app.get("/health", async (_req, res) => {
   debugLog("Health check requested");
   res.json({
@@ -335,6 +466,9 @@ app.post("/call-tool", async (req, res) => {
   try {
     const { name, arguments: args } = req.body || {};
     const authenticatedUser = getAuthenticatedUser(req);
+    if (accountLockManager && accountLockManager.isLocked(authenticatedUser)) {
+      return res.status(403).json({ error: "Request denied by policy", reason: "account locked" });
+    }
     const hasEntraToken = Boolean(req.headers["x-entra-token"]);
     debugLog("Call tool request received", {
       name,
@@ -351,20 +485,55 @@ app.post("/call-tool", async (req, res) => {
     const targetUserId = deriveTarget(args);
 
     const opaRequest = buildOpaInput(req, name, args);
+    const requestId = req.body?.request_id || (demoRequestIdGenerator ? demoRequestIdGenerator.nextId() : `Request-${crypto.randomBytes(6).toString("hex")}`);
     immudbLogger
       .recordPolicyDecision({
+        requestId,
         authenticatedUser,
         requesterIp,
         toolName: name,
         targetUserId,
         allow: opaDecision.allow,
         reason: opaDecision.reason,
+        decision: opaDecision.decision,
+        reasons: opaDecision.reasons,
+        policyVersion: opaDecision.policy_version,
+        triggeredControls: opaDecision.triggered_controls,
         opaRequest: redactOpaInput(opaRequest),
         opaResponse: opaDecision.raw
       })
       .catch((error) => {
         console.warn("Failed to write immuDB policy log:", error?.message || error);
       });
+
+    if (Array.isArray(opaDecision.actions) && opaDecision.actions.includes("ALERT_SECURITY")) {
+      immudbLogger.recordAlert({
+        requestId,
+        authenticatedUser,
+        requesterIp,
+        toolName: name,
+        reason: opaDecision.reason,
+        reasons: opaDecision.reasons,
+        actions: opaDecision.actions,
+        risk: opaDecision.risk
+      });
+    }
+
+    if (Array.isArray(opaDecision.actions) && opaDecision.actions.includes("LOCK_ACCOUNT")) {
+      if (accountLockManager) {
+        accountLockManager.lockAccount(authenticatedUser, { requestId, reason: opaDecision.reason });
+      }
+    }
+
+    if (opaDecision.decision === "THROTTLE") {
+      return res.status(429).json({
+        error: "Request throttled by policy",
+        reason: opaDecision.reason,
+        cooldown_seconds: opaDecision.cooldown_seconds,
+        message: `cooling-off period ${opaDecision.cooldown_seconds}s, confirm out-of-band`,
+        request_id: requestId
+      });
+    }
 
     if (!opaDecision.allow) {
       debugLog("OPA denied request", { name, reason: opaDecision.reason });
@@ -388,7 +557,9 @@ app.post("/call-tool", async (req, res) => {
         });
       return res.status(403).json({
         error: "Request denied by policy",
-        reason: opaDecision.reason
+        reason: opaDecision.reason,
+        reasons: opaDecision.reasons,
+        request_id: requestId
       });
     }
 
@@ -433,7 +604,7 @@ app.post("/call-tool", async (req, res) => {
       correlationId
     });
 
-    res.json({ success: true, result, correlationId });
+    res.json({ success: true, result, correlationId, request_id: requestId });
   } catch (error) {
     auditErrorCode = error?.code || error?.name || "unknown";
     auditErrorMessage = truncateText(error?.message || String(error));
@@ -466,6 +637,8 @@ app.post("/call-tool", async (req, res) => {
     res.status(500).json({ error: error?.message || "Tool call failed", correlationId });
   }
 });
+
+
 
 const server = app.listen(port, () => {
   console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);

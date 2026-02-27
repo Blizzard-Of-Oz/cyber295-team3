@@ -1,50 +1,75 @@
 {
   "config": {
     "internal_domains": [
+      "company.com",
       "ischool.berkeley.edu",
       "billyyaoischoolberkeley.onmicrosoft.com"
     ],
     "allowed_external_emails": [
-      "team3.mcp@gmail.com"
+      "yaoyaozong+allow@gmail.com"
     ],
-    "blocked_recipients": [
-      "yaoyaozong@gmail.com"
-    ],
+    "blocked_recipients": [],
     "broadcast_patterns": [
-      "^all@",
+      "^all-employees@",
       "^everyone@",
-      "^companywide@",
-      "^all-employees@"
+      "^all@"
     ],
-    "broadcast_allowed_identities": [
-      "team3@billyyaoischoolberkeley.onmicrosoft.com"
+    "broadcast_allowed_roles": [
+      "exec",
+      "comms_director"
     ],
-    "max_recipients": 10,
-    "max_body_chars": 20000,
-    "require_nonempty_subject": true,
+    "role_recipient_limits": {
+      "soc_analyst": 50,
+      "exec": 2000,
+      "comms_director": 5000
+    },
     "business_hours": {
       "start_hour": 9,
       "end_hour": 18,
       "timezone": "UTC-6"
     },
-    "user_roles": {
-      "roles": [
-        {
-          "name": "soc_analyst",
-          "description": "Security Operations Center Analyst",
-          "members": [
-            "team3@billyyaoischoolberkeley.onmicrosoft.com"
-          ]
-        }
-      ]
+    "urgency_keywords": {
+      "urgent": 2.0,
+      "immediately": 2.0,
+      "asap": 1.5,
+      "critical": 2.5,
+      "right now": 2.0,
+      "escalate": 1.0
     },
-    "teams": {
-      "soc_team": {
-        "description": "Security Operations Center Team",
-        "members": [
-          "member1@billyyaoischoolberkeley.onmicrosoft.com"
-        ]
+    "urgency_threshold": 8.0,
+    "throttle_seconds": 60,
+    "injection_patterns": [
+      "IGNORE PREVIOUS INSTRUCTIONS",
+      "admin mode",
+      "override policy",
+      "forward finance emails"
+    ],
+    "after_hours_attachment_limit_bytes": 1000000,
+    "personal_domains": [
+      "gmail.com",
+      "outlook.com",
+      "yahoo.com"
+    ],
+    "user_db": {
+      "team3@billyyaoischoolberkeley.onmicrosoft.com": {
+        "role": "soc_analyst",
+        "employment_status": "active",
+        "days_remaining": 0
+      },
+      "jdoe@billyyaoischoolberkeley.onmicrosoft.com": {
+        "role": "comms_director",
+        "employment_status": "notice_period",
+        "days_remaining": 9
+      },
+      "billyyao_ischool.berkeley.edu#EXT#@billyyaoischoolberkeley.onmicrosoft.com": {
+        "role": "exec",
+        "employment_status": "active",
+        "days_remaining": 0
       }
-    }
+    },
+    "trusted_senders": [
+      "team3@billyyaoischoolberkeley.onmicrosoft.com"
+    ],
+    "policy_version": "v2-demo-story"
   }
 }
