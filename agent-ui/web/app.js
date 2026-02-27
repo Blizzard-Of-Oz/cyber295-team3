@@ -9,12 +9,14 @@ const signinBtn = document.getElementById("signinBtn");
 const signoutBtn = document.getElementById("signoutBtn");
 const userInfo = document.getElementById("userInfo");
 const userName = document.getElementById("userName");
+const userEmail = document.getElementById("userEmail");
 const csrfBanner = document.getElementById("csrfBanner");
 const csrfMessage = document.getElementById("csrfMessage");
 const csrfRetry = document.getElementById("csrfRetry");
 
 let isAuthenticated = false;
 let csrfToken = "";
+let cachedUser = null;
 
 function showAuthPrompt() {
   isAuthenticated = false;
@@ -32,6 +34,10 @@ function showApp(user) {
   runButton.disabled = false;
   if (user) {
     userName.textContent = user.name || user.username || "Signed in";
+    const emailValue =
+      user.email || user.mail || user.preferred_username || user.username || "";
+    userEmail.textContent = emailValue;
+    userEmail.style.display = emailValue ? "block" : "none";
     userInfo.style.display = "flex";
   }
 }
@@ -72,13 +78,23 @@ async function loadCsrfToken() {
 
 async function checkAuthentication() {
   try {
-    const response = await fetch("/api/user");
+    const response = await fetch("/api/user", { cache: "no-store" });
+    if (response.status === 304) {
+      if (cachedUser) {
+        showApp(cachedUser);
+        await loadCsrfToken();
+        return;
+      }
+      showAuthPrompt();
+      return;
+    }
     if (!response.ok) {
       showAuthPrompt();
       return;
     }
     const data = await response.json();
-    showApp(data.user);
+    cachedUser = data.user || null;
+    showApp(cachedUser);
     await loadCsrfToken();
   } catch (error) {
     showAuthPrompt();
