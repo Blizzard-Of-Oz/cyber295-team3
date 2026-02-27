@@ -7,8 +7,8 @@ import fs from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
-import { createDemoRouter } from "./demo-router.js";
-import { loadDemoUsers, DemoRequestIdGenerator, AccountLockManager } from "./demo-utils.js";
+import { createDemoRouter } from "./demo.js";
+import { DemoRequestIdGenerator, AccountLockManager } from "./demo-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -22,12 +22,10 @@ const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
 const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
 
 // Demo utilities (loaded only if demo routes are enabled)
-let demoUsers = {};
 let demoRequestIdGenerator = null;
 let accountLockManager = null;
 
 if (ENABLE_DEMO_ROUTES) {
-  demoUsers = loadDemoUsers();
   demoRequestIdGenerator = new DemoRequestIdGenerator();
   accountLockManager = new AccountLockManager();
 }
@@ -191,40 +189,8 @@ function unique(array) {
   return [...new Set(array)];
 }
 
-function computeUrgencyScore(text) {
-  const lowerText = (text || "").toLowerCase();
-  const weights = {
-    urgent: 2,
-    immediately: 2,
-    asap: 1.5,
-    critical: 2.5,
-    "right now": 2,
-    escalate: 1
-  };
-  return Object.entries(weights).reduce(
-    (sum, [keyword, weight]) => (lowerText.includes(keyword) ? sum + weight : sum),
-    0
-  );
-}
-
-function hasPromptInjectionPattern(text) {
-  const patterns = [
-    "ignore previous instructions",
-    "admin mode",
-    "override policy",
-    "forward finance emails"
-  ];
-  const lowerText = (text || "").toLowerCase();
-  return patterns.some((p) => lowerText.includes(p));
-}
-
-// NOTE: Business hours check is now handled by OPA policy, not by this application.
-// OPA uses its own server time (secure) and configurable business hours from data.json.
-// This ensures the timestamp cannot be manipulated by clients.
-
-function isCompanyWideRecipient(recipient) {
-  return /^(all-employees|everyone|all)@/i.test(recipient || "");
-}
+// NOTE: Urgency score calculation is now handled by OPA policy, not by this application.
+// OPA uses urgency_keywords from data.json and checks both content_text and user_input.
 
 function extractToolError(result) {
   if (!result || typeof result !== "object") return null;
@@ -259,20 +225,8 @@ function buildOpaInput(req, toolName, args) {
     ...normalizeEmailList(args?.bcc),
     ...normalizeEmailList(args?.message?.to)
   ]);
-  const recipientDomains = unique(
-    recipients
-      .filter((r) => r.includes("@"))
-      .map((r) => r.split("@").pop()?.toLowerCase())
-      .filter(Boolean)
-  );
   const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
-  const urgencyScore = Math.min(10, computeUrgencyScore(contentText));
-  const requesterIdentity = authenticatedUser.toLowerCase();
-  const profile = demoUsers[requesterIdentity] || {
-    role: req.body?.requester?.role || "soc_analyst",
-    employment_status: "active",
-    days_remaining: 0
-  };
+  const userInput = req.body?.context?.userInput || null;
 
   const opaInput = {
     tool: {
@@ -282,7 +236,6 @@ function buildOpaInput(req, toolName, args) {
     requester: {
       ip: requesterIp,
       identity: authenticatedUser,
-      role: profile.role,
       token: headers["x-entra-token"] || headers.authorization || null
     },
     request: {
@@ -294,16 +247,12 @@ function buildOpaInput(req, toolName, args) {
     context: {
       recipient_count: recipients.length,
       recipients,
-      recipient_domains: recipientDomains,
-      is_companywide: recipients.some((r) => isCompanyWideRecipient(r)),
-      urgency_score: urgencyScore,
-      has_prompt_injection: hasPromptInjectionPattern(contentText),
+      content_text: contentText,
+      user_input: userInput,
       attachment_bytes: Number(args?.attachmentBytes || args?.attachment_bytes || 0),
       attachment_name: args?.attachmentName || args?.attachment_name || null,
       data_classification: args?.dataClassification || args?.data_classification || "none",
-      record_count: Number(args?.recordCount || args?.record_count || 0),
-      employment_status: profile.employment_status,
-      days_remaining: profile.days_remaining
+      record_count: Number(args?.recordCount || args?.record_count || 0)
     }
   };
 

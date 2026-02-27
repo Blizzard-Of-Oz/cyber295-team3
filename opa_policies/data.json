@@ -6,7 +6,9 @@
       "billyyaoischoolberkeley.onmicrosoft.com"
     ],
     "allowed_external_emails": [
-      "yaoyaozong+allow@gmail.com"
+      "yaoyaozong+allow1@gmail.com",
+      "yaoyaozong+allow2@gmail.com",
+      "yaoyaozong+allow3@gmail.com"
     ],
     "blocked_recipients": [],
     "broadcast_patterns": [
@@ -19,9 +21,9 @@
       "comms_director"
     ],
     "role_recipient_limits": {
-      "soc_analyst": 50,
-      "exec": 2000,
-      "comms_director": 5000
+      "soc_analyst": 2,
+      "exec": 4,
+      "comms_director": 500
     },
     "business_hours": {
       "start_hour": 9,
@@ -29,14 +31,14 @@
       "timezone": "UTC-6"
     },
     "urgency_keywords": {
-      "urgent": 2.0,
-      "immediately": 2.0,
-      "asap": 1.5,
-      "critical": 2.5,
-      "right now": 2.0,
-      "escalate": 1.0
+      "urgent": 2.3,
+      "immediately": 2.4,
+      "asap": 1.1,
+      "critical": 2.7,
+      "right now": 2.9,
+      "escalate": 1.3
     },
-    "urgency_threshold": 8.0,
+    "urgency_threshold": 4.0,
     "throttle_seconds": 60,
     "injection_patterns": [
       "IGNORE PREVIOUS INSTRUCTIONS",
@@ -61,7 +63,7 @@
         "employment_status": "notice_period",
         "days_remaining": 9
       },
-      "billyyao_ischool.berkeley.edu#EXT#@billyyaoischoolberkeley.onmicrosoft.com": {
+      "billyyao_ischool.berkeley.edu#ext#@billyyaoischoolberkeley.onmicrosoft.com": {
         "role": "exec",
         "employment_status": "active",
         "days_remaining": 0

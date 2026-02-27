@@ -93,20 +93,70 @@ default decision_outcome = "DENY"
 default risk = "medium"
 default cooldown_seconds = 0
 
-requester_role := object.get(input.requester, "role", "unknown")
+# Look up user profile from user_db (single source of truth)
 requester_identity := lower(object.get(input.requester, "identity", "unknown"))
+user_profile := object.get(cfg.user_db, requester_identity, {})
+
+# Extract user attributes from user_db, with defaults
+requester_role := object.get(user_profile, "role", "unknown")
+employment_status := object.get(user_profile, "employment_status", "active")
+user_days_remaining := object.get(user_profile, "days_remaining", 0)
 
 recipient_count := object.get(input.context, "recipient_count", 0)
-is_companywide := object.get(input.context, "is_companywide", false)
-urgency_score := object.get(input.context, "urgency_score", 0)
-has_prompt_injection := object.get(input.context, "has_prompt_injection", false)
 attachment_bytes := object.get(input.context, "attachment_bytes", 0)
 data_classification := object.get(input.context, "data_classification", "none")
-employment_status := object.get(input.context, "employment_status", "active")
 record_count := object.get(input.context, "record_count", 0)
 
 recipients := object.get(input.context, "recipients", [])
-recipient_domains := object.get(input.context, "recipient_domains", [])
+
+# Extract domains from recipient email addresses
+recipient_domains := {domain |
+  some r in recipients
+  contains(r, "@")
+  parts := split(r, "@")
+  domain := lower(parts[count(parts)-1])
+}
+
+content_text := object.get(input.context, "content_text", "")
+user_input := object.get(input.context, "user_input", "")
+
+# Compute urgency score from content and user input
+# For each keyword that appears, add its weight to the score (counts once per keyword)
+compute_urgency_score(text) = total if {
+  text_lower := lower(text)
+  scores := [cfg.urgency_keywords[kw] | some kw in object.keys(cfg.urgency_keywords); contains(text_lower, lower(kw))]
+  raw_total := sum(scores)
+  total := min([10.0, raw_total])
+}
+
+urgency_score := score if {
+  content_score := compute_urgency_score(content_text)
+  user_input_score := compute_urgency_score(user_input)
+  score := max([content_score, user_input_score])
+}
+
+# Determine if any recipient matches broadcast patterns from config
+is_companywide if {
+  some r in recipients
+  rr := lower(r)
+  some pattern in cfg.broadcast_patterns
+  regex.match(pattern, rr)
+}
+
+# Detect prompt injection by checking content and user input against injection patterns
+has_prompt_injection if {
+  content_lower := lower(content_text)
+  some pattern in cfg.injection_patterns
+  pattern_lower := lower(pattern)
+  contains(content_lower, pattern_lower)
+}
+
+has_prompt_injection if {
+  user_input_lower := lower(user_input)
+  some pattern in cfg.injection_patterns
+  pattern_lower := lower(pattern)
+  contains(user_input_lower, pattern_lower)
+}
 
 any_personal_domain if {
   some d in recipient_domains
@@ -122,7 +172,8 @@ trusted_sender if {
   requester_identity in cfg.trusted_senders
 }
 
-role_limit := object.get(cfg.role_recipient_limits, requester_role, 25)
+# unknown role, only 1 recipient allowed by default
+role_limit := object.get(cfg.role_recipient_limits, requester_role, 1)
 
 recipient_limit_exceeded if {
   recipient_count > role_limit
@@ -141,6 +192,19 @@ blocked_external_recipient if {
   parts := split(rr, "@")
   domain := parts[count(parts)-1]
   not domain in cfg.internal_domains
+  not domain in cfg.personal_domains
+}
+
+blocked_external_recipient if {
+  some r in recipients
+  rr := lower(r)
+  contains(rr, "@")
+  not rr in cfg.allowed_external_emails
+  parts := split(rr, "@")
+  domain := parts[count(parts)-1]
+  not domain in cfg.internal_domains
+  domain in cfg.personal_domains
+  not is_working_hours
 }
 
 after_hours_personal_domain if {
@@ -228,7 +292,20 @@ triggered_controls[c] if {
 
 deny_reasons[r] if {
   has_prompt_injection
-  r := "Prompt injection pattern \"IGNORE PREVIOUS INSTRUCTIONS\" detected."
+  content_lower := lower(content_text)
+  some pattern in cfg.injection_patterns
+  pattern_lower := lower(pattern)
+  contains(content_lower, pattern_lower)
+  r := sprintf("Prompt injection pattern detected in email: \"%s\"", [pattern])
+}
+
+deny_reasons[r] if {
+  has_prompt_injection
+  user_input_lower := lower(user_input)
+  some pattern in cfg.injection_patterns
+  pattern_lower := lower(pattern)
+  contains(user_input_lower, pattern_lower)
+  r := sprintf("Prompt injection pattern detected in user input: \"%s\"", [pattern])
 }
 
 deny_reasons[r] if {
@@ -273,7 +350,7 @@ allow_reasons[r] if {
 
 throttle_reasons[r] if {
   high_urgency_untrusted
-  r := "High urgency score from untrusted sender; cooling-off period required."
+  r := sprintf("High urgency score %g (threshold: %g) from untrusted sender; cooling-off period required.", [urgency_score, cfg.urgency_threshold])
 }
 
 decision_outcome = "DENY" if {

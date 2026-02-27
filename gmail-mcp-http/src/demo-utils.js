@@ -1,23 +1,3 @@
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-/**
- * Load demo user profiles from demo-users.json
- * Returns empty object if file doesn't exist
- */
-export function loadDemoUsers() {
-  const demoUsersPath = path.resolve(__dirname, "demo-users.json");
-  try {
-    const data = fs.readFileSync(demoUsersPath, "utf8");
-    return JSON.parse(data);
-  } catch (_error) {
-    return {};
-  }
-}
-
 /**
  * Manages demo request counter for generating sequential request IDs
  */

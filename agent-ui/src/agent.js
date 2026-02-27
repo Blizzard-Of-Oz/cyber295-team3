@@ -27,7 +27,7 @@ export function createAgent({ mcpClientManager }) {
     }
 
     const correlationId = crypto.randomBytes(12).toString("hex");
-    context = { ...context, correlationId };
+    context = { ...context, correlationId, userInput: requirement };
 
     const mcpTools = await mcpClientManager.listTools();
     debugLog("Tools loaded for agent", { count: mcpTools.length });

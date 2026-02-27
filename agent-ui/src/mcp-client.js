@@ -45,7 +45,11 @@ export class McpClientManager {
       headers,
       body: JSON.stringify({
         name,
-        arguments: args
+        arguments: args,
+        context: {
+          userInput: context.userInput || null,
+          correlationId: context.correlationId || null
+        }
       })
     });
 
