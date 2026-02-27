@@ -24,7 +24,7 @@
     "business_hours": {
       "start_hour": 9,
       "end_hour": 18,
-      "timezone": "UTC+0"
+      "timezone": "UTC-6"
     },
     "urgency_keywords": {
       "urgent": 2.0,
