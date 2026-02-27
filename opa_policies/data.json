@@ -5,7 +5,9 @@
       "ischool.berkeley.edu",
       "billyyaoischoolberkeley.onmicrosoft.com"
     ],
-    "allowed_external_emails": [],
+    "allowed_external_emails": [
+      "yaoyaozong+allow@gmail.com"
+    ],
     "blocked_recipients": [],
     "broadcast_patterns": [
       "^all-employees@",
