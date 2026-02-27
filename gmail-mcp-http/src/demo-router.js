@@ -21,10 +21,20 @@ export function createDemoRouter(port, accountLockManager) {
     }
 
     try {
+      // Extract headers from payload (if any) and merge with content-type
+      const customHeaders = payload.headers || {};
+      const requestHeaders = {
+        "content-type": "application/json",
+        ...customHeaders
+      };
+
+      // Remove headers from payload body to avoid sending them twice
+      const { headers: _, ...bodyPayload } = payload;
+
       const response = await fetch(`http://127.0.0.1:${port}/call-tool`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
+        headers: requestHeaders,
+        body: JSON.stringify(bodyPayload)
       });
       const body = await response.json().catch(() => ({ error: "invalid_response" }));
       return res.status(response.status).json(body);

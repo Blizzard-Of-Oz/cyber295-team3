@@ -19,13 +19,14 @@ const OPA_DECISION_URL =
   process.env.OPA_DECISION_URL || "http://localhost:8181/v1/data/gmail/decision";
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
+const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
 
 // Demo utilities (loaded only if demo routes are enabled)
 let demoUsers = {};
 let demoRequestIdGenerator = null;
 let accountLockManager = null;
 
-if (process.env.ENABLE_DEMO_ROUTES !== "false") {
+if (ENABLE_DEMO_ROUTES) {
   demoUsers = loadDemoUsers();
   demoRequestIdGenerator = new DemoRequestIdGenerator();
   accountLockManager = new AccountLockManager();
@@ -217,11 +218,9 @@ function hasPromptInjectionPattern(text) {
   return patterns.some((p) => lowerText.includes(p));
 }
 
-function parseBusinessHoursTimestamp(isoTs) {
-  const date = isoTs ? new Date(isoTs) : new Date();
-  const hour = date.getHours();
-  return hour >= 9 && hour < 18;
-}
+// NOTE: Business hours check is now handled by OPA policy, not by this application.
+// OPA uses its own server time (secure) and configurable business hours from data.json.
+// This ensures the timestamp cannot be manipulated by clients.
 
 function isCompanyWideRecipient(recipient) {
   return /^(all-employees|everyone|all)@/i.test(recipient || "");
@@ -268,8 +267,6 @@ function buildOpaInput(req, toolName, args) {
   );
   const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
   const urgencyScore = Math.min(10, computeUrgencyScore(contentText));
-  const timestamp =
-    req.body?.context?.timestamp || req.body?.timestamp || req.headers["x-demo-timestamp"] || new Date().toISOString();
   const requesterIdentity = authenticatedUser.toLowerCase();
   const profile = demoUsers[requesterIdentity] || {
     role: req.body?.requester?.role || "soc_analyst",
@@ -277,7 +274,7 @@ function buildOpaInput(req, toolName, args) {
     days_remaining: 0
   };
 
-  return {
+  const opaInput = {
     tool: {
       name: toolName,
       arguments: args
@@ -295,8 +292,6 @@ function buildOpaInput(req, toolName, args) {
       body: req.body || null
     },
     context: {
-      timestamp,
-      is_working_hours: parseBusinessHoursTimestamp(timestamp),
       recipient_count: recipients.length,
       recipients,
       recipient_domains: recipientDomains,
@@ -311,6 +306,18 @@ function buildOpaInput(req, toolName, args) {
       days_remaining: profile.days_remaining
     }
   };
+
+  // For demo/testing purposes only: allow explicit timestamp in nanoseconds
+  // Only accepted when ENABLE_DEMO_ROUTES is true to prevent production misuse
+  // In production (ENABLE_DEMO_ROUTES=false), OPA always uses its own server time which is secure
+  if (ENABLE_DEMO_ROUTES && req.headers["x-demo-timestamp-ns"]) {
+    const timestampNs = Number(req.headers["x-demo-timestamp-ns"]);
+    if (!isNaN(timestampNs) && timestampNs > 0) {
+      opaInput.timestamp = timestampNs;
+    }
+  }
+
+  return opaInput;
 }
 
 function redactOpaInput(input) {
@@ -424,7 +431,7 @@ const immudbLogger = new ImmuDBLogger({
 const mcpClientManager = new McpClientManager();
 
 // Mount demo routes if enabled (default: enabled in dev environments)
-if (process.env.ENABLE_DEMO_ROUTES !== "false" && accountLockManager) {
+if (ENABLE_DEMO_ROUTES && accountLockManager) {
   const demoRouter = createDemoRouter(port, accountLockManager);
   app.use(demoRouter);
 }
