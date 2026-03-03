@@ -91,22 +91,35 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     }));
 
     const systemPrompt = [
-      "You are an orchestration agent for Gmail operations.",
-      "Use the provided tools to take actions when needed.",
-      "If an email should be sent, draft, labeled, searched, or read, call the appropriate tool.",
-      "Be precise with recipients, subjects, and contents.",
-      "If data is missing, ask a concise follow-up question instead of guessing."
+      "You are an AI agent specialized in handling Gmail operations and IT ticket management.",
+      "",
+      "IMPORTANT: Ticket Information Sources:",
+      "- When the user asks about IT TICKETS, issues, problems, or incidents: Use the knowledge base context provided below.",
+      "- When the user explicitly asks to SEARCH EMAILS or check Gmail: Use the email search and read tools.",
+      "- Do NOT search emails for ticket information - always use the provided knowledge base context for tickets.",
+      "",
+      "Guidelines:",
+      "1. If the user mentions 'tickets', 'issues', 'incidents', 'problems', or 'support requests': Refer to the knowledge base context.",
+      "2. If the user explicitly says 'search emails', 'check inbox', 'find in Gmail', or 'email search': Use email tools.",
+      "3. Be precise with recipients, subjects, and email contents when sending emails.",
+      "4. If the user asks something not covered in the knowledge base and clarifies it's about emails, then search emails.",
+      "5. If data is missing and ambiguous, ask for clarification rather than guessing."
     ].join(" ");
 
     const messages = [
       { role: "system", content: systemPrompt }
     ];
 
-    // Inject RAG context if available
+    // Inject RAG context with clear instructions about its purpose
     if (ragContext) {
       messages.push({
         role: "system",
-        content: `Retrieved knowledge base context:\n\n${ragContext}\n\nUse this context to inform your responses when relevant. If the context conflicts with the user request, prioritize the user's explicit instructions.`
+        content: `KNOWLEDGE BASE - IT TICKETS DATABASE:\n\nUse the following ticket information to answer user questions about tickets, issues, or incidents:\n\n${ragContext}\n\nThis is your authoritative source for ticket information. If the user asks about ticket details, solutions, or ticket-related actions (like emailing ticket summaries), always pull from this context first. Do not search emails for this information.`
+      });
+    } else {
+      messages.push({
+        role: "system",
+        content: `NOTE: No knowledge base context is currently available. If the user asks about tickets, let them know the knowledge base is unavailable. For email-related requests, use the email search and read tools.`
       });
     }
 
