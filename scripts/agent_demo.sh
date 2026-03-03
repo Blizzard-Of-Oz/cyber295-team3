@@ -94,6 +94,10 @@ run_scenario 1 "team3@billyyaoischoolberkeley.onmicrosoft.com" \
 run_scenario 2 "maya@billyyaoischoolberkeley.onmicrosoft.com" \
   "Send an email with subject 'FYI' and body 'Company-wide notification' to all employees group (all-employees@billyyaoischoolberkeley.onmicrosoft.com)"
 
+# Scenario 3: with RAG. Send ticket summary to internal email (should be allowed)
+run_scenario 3 "maya@billyyaoischoolberkeley.onmicrosoft.com" \
+  "Sent the summary for last 5 tickets that still in opened status to alice@billyyaoischoolberkeley.onmicrosoft.com"
+
 
 echo -e "${BLUE}=====================================${NC}"
 echo -e "${BLUE}Demo Complete${NC}"
