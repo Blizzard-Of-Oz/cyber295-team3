@@ -1,24 +1,32 @@
 import { OpenAI } from "openai";
 import crypto from "crypto";
 
-export function createAgent({ mcpClientManager }) {
+export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = null }) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
   const DEBUG = process.env.DEBUG === "true";
 
   const debugLog = (message, meta) => {
     if (!DEBUG) return;
-    console.log("\n---");
+    
+    // Collect logs if array provided
+    if (debugLogs) {
+      debugLogs.push({ source: 'agent', message, meta });
+    }
+    
+    // In JSON mode, send to stderr; otherwise stdout
+    const output = jsonMode ? console.error : console.log;
+    output("\n---");
     if (meta !== undefined) {
       try {
-        console.log(`[agent-ui][debug] ${message}`, JSON.stringify(meta, null, 2));
+        output(`[agent-ui][debug] ${message}`, JSON.stringify(meta, null, 2));
       } catch {
-        console.log(`[agent-ui][debug] ${message}`, meta);
+        output(`[agent-ui][debug] ${message}`, meta);
       }
     } else {
-      console.log(`[agent-ui][debug] ${message}`);
+      output(`[agent-ui][debug] ${message}`);
     }
-    console.log("---");
+    output("---");
   };
 
   async function run(requirement, context = {}) {
