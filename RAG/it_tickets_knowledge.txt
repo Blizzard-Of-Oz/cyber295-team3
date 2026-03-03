@@ -1,0 +1,214 @@
+IT TICKETS KNOWLEDGE BASE
+Each section represents one ticket.
+-------------------------------------
+
+Ticket ID: INC-1001
+Created At: 2026-03-02T08:12:00
+Priority: P1
+Status: Open
+Summary: VPN login failure
+Details: User unable to connect to corporate VPN from home network. Error code 812.
+Solution: Reset VPN profile and reissued credentials.
+Created By: John Smith
+Email: john.smith@company.com
+Role: Manager
+Department: Finance
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1002
+Created At: 2026-03-02T09:03:00
+Priority: P2
+Status: Open
+Summary: Email sync issue
+Details: Outlook not syncing new emails on mobile device.
+Solution: Reconfigured Exchange ActiveSync profile.
+Created By: Maria Garcia
+Email: maria.garcia@company.com
+Role: Analyst
+Department: HR
+Location: Katy
+-------------------------------------
+
+Ticket ID: INC-1003
+Created At: 2026-03-02T09:45:00
+Priority: P0
+Status: Open
+Summary: Production server outage
+Details: Primary API server not responding. Customers reporting 503 errors.
+Solution: Restarted Kubernetes pods and scaled replicas.
+Created By: David Lee
+Email: david.lee@company.com
+Role: Director
+Department: Engineering
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1004
+Created At: 2026-03-02T10:10:00
+Priority: P3
+Status: Closed
+Summary: Printer not working
+Details: Office printer displaying paper jam error.
+Solution: Cleared jam and updated firmware.
+Created By: Sarah Johnson
+Email: sarah.johnson@company.com
+Role: Coordinator
+Department: Operations
+Location: Katy
+-------------------------------------
+
+Ticket ID: INC-1005
+Created At: 2026-03-02T10:32:00
+Priority: P1
+Status: Open
+Summary: Password reset request
+Details: User forgot domain password and locked account.
+Solution: Reset password via Active Directory and unlocked account.
+Created By: Michael Brown
+Email: michael.brown@company.com
+Role: Manager
+Department: Sales
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1006
+Created At: 2026-03-02T11:05:00
+Priority: P2
+Status: Open
+Summary: WiFi connectivity issues
+Details: Intermittent WiFi disconnections in conference room.
+Solution: Adjusted access point channel and signal strength.
+Created By: Emily Davis
+Email: emily.davis@company.com
+Role: Staff
+Department: Marketing
+Location: Katy
+-------------------------------------
+
+Ticket ID: INC-1007
+Created At: 2026-03-02T11:22:00
+Priority: P1
+Status: Open
+Summary: Database latency
+Details: Finance reporting system running slow during peak hours.
+Solution: Optimized SQL queries and added index.
+Created By: Robert Wilson
+Email: robert.wilson@company.com
+Role: Manager
+Department: Finance
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1008
+Created At: 2026-03-02T12:01:00
+Priority: P2
+Status: Open
+Summary: Teams call drops
+Details: Video calls disconnect after 10 minutes.
+Solution: Updated network driver and adjusted QoS policy.
+Created By: Linda Martinez
+Email: linda.martinez@company.com
+Role: Staff
+Department: HR
+Location: Katy
+-------------------------------------
+
+Ticket ID: INC-1009
+Created At: 2026-03-02T12:35:00
+Priority: P3
+Status: Closed
+Summary: Software installation request
+Details: User requested Adobe Acrobat installation.
+Solution: Installed software via endpoint management tool.
+Created By: James Anderson
+Email: james.anderson@company.com
+Role: Analyst
+Department: Legal
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1010
+Created At: 2026-03-02T13:14:00
+Priority: P1
+Status: Open
+Summary: Shared drive access denied
+Details: User cannot access department shared folder.
+Solution: Adjusted NTFS permissions.
+Created By: Patricia Thomas
+Email: patricia.thomas@company.com
+Role: Director
+Department: Operations
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1011
+Created At: 2026-03-01T15:22:00
+Priority: P2
+Status: Closed
+Summary: Laptop overheating
+Details: Laptop shuts down during heavy usage.
+Solution: Cleaned cooling fan and replaced thermal paste.
+Created By: Christopher White
+Email: christopher.white@company.com
+Role: Staff
+Department: Engineering
+Location: Katy
+-------------------------------------
+
+Ticket ID: INC-1012
+Created At: 2026-03-01T16:10:00
+Priority: P0
+Status: Closed
+Summary: Security breach alert
+Details: Suspicious login attempts detected on admin account.
+Solution: Forced password reset and enabled multi-factor authentication.
+Created By: Jessica Harris
+Email: jessica.harris@company.com
+Role: Director
+Department: IT
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1013
+Created At: 2026-03-01T17:02:00
+Priority: P1
+Status: Open
+Summary: Payroll system error
+Details: Employees unable to submit timesheets.
+Solution: Restarted payroll service and cleared cache.
+Created By: Daniel Clark
+Email: daniel.clark@company.com
+Role: Manager
+Department: HR
+Location: Katy
+-------------------------------------
+
+Ticket ID: INC-1014
+Created At: 2026-02-28T09:55:00
+Priority: P2
+Status: Closed
+Summary: Slow internet speed
+Details: Users reporting slow browsing speeds.
+Solution: Upgraded ISP bandwidth allocation.
+Created By: Amanda Lewis
+Email: amanda.lewis@company.com
+Role: Staff
+Department: Marketing
+Location: Houston
+-------------------------------------
+
+Ticket ID: INC-1015
+Created At: 2026-02-28T14:20:00
+Priority: P3
+Status: Closed
+Summary: Monitor flickering
+Details: External monitor flickering intermittently.
+Solution: Replaced HDMI cable.
+Created By: Matthew Walker
+Email: matthew.walker@company.com
+Role: Analyst
+Department: Finance
+Location: Katy
+-------------------------------------
+END OF FILE

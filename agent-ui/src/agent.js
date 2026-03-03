@@ -37,6 +37,48 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     const correlationId = crypto.randomBytes(12).toString("hex");
     context = { ...context, correlationId, userInput: requirement };
 
+    // RAG: Retrieve relevant context from vector store
+    const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
+    const topK = Number(process.env.RAG_TOP_K || 5);
+    const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
+    
+    let ragContext = "";
+    if (vectorStoreId) {
+      debugLog("RAG retrieval started", { vectorStoreId, topK, minScore });
+      try {
+        // Query the vector store
+        const searchRes = await openai.vectorStores.search(vectorStoreId, {
+          query: requirement,
+          max_num_results: topK
+        });
+
+        // Filter by similarity score and format results
+        const hits = (searchRes?.data || [])
+          .filter((h) => (h.score ?? 0) >= minScore)
+          .map((h, i) => {
+            // Extract text content from the chunk
+            const text = (h.content || [])
+              .map((c) => c.text?.value || c.text || "")
+              .join("\n")
+              .slice(0, 1500); // Limit each chunk to 1500 chars
+            const source = h.metadata?.filename || h.file_id || `doc_${i + 1}`;
+            return `[Source #${i + 1}: ${source}]\n${text}`;
+          });
+
+        if (hits.length > 0) {
+          ragContext = hits.join("\n\n");
+          debugLog("RAG retrieval successful", { chunks: hits.length });
+        } else {
+          debugLog("RAG retrieval: no chunks met score threshold", { minScore });
+        }
+      } catch (error) {
+        debugLog("RAG retrieval failed; continuing without context", { 
+          error: error?.message,
+          status: error?.status 
+        });
+      }
+    }
+
     const mcpTools = await mcpClientManager.listTools();
     debugLog("Tools loaded for agent", { count: mcpTools.length });
     const tools = mcpTools.map((tool) => ({
@@ -57,9 +99,18 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     ].join(" ");
 
     const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: requirement }
+      { role: "system", content: systemPrompt }
     ];
+
+    // Inject RAG context if available
+    if (ragContext) {
+      messages.push({
+        role: "system",
+        content: `Retrieved knowledge base context:\n\n${ragContext}\n\nUse this context to inform your responses when relevant. If the context conflicts with the user request, prioritize the user's explicit instructions.`
+      });
+    }
+
+    messages.push({ role: "user", content: requirement });
 
     const toolOutputs = [];
     const allToolCalls = [];

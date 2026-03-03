@@ -48,6 +48,30 @@ export MCP_HTTP_URL=http://localhost:3301
 export DEBUG=true
 ```
 
+5. (Optional) Set up RAG with vector store:
+
+To enable Retrieval Augmented Generation, create and populate an OpenAI vector store:
+
+```bash
+node setup-vector-store.js ../it_tickets_knowledge.txt
+```
+
+Or use the npm script:
+
+```bash
+npm run setup-vector-store ../it_tickets_knowledge.txt
+```
+
+The script will output a `OPENAI_VECTOR_STORE_ID`. Add it to your environment:
+
+```
+export OPENAI_VECTOR_STORE_ID=vs_xxxxx
+export RAG_TOP_K=5          # Number of chunks to retrieve (default: 5)
+export RAG_MIN_SCORE=0.6    # Minimum similarity score (default: 0.6)
+```
+
+With RAG enabled, the agent will retrieve relevant context from your knowledge base before processing user queries.
+
 ## Run
 
 ```
