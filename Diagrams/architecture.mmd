@@ -15,6 +15,7 @@ architecture-beta
   group g_ext(internet)[External Services]
   group g_opa_policy(internet)[OPA Policy Repo]
   group g_redis[Action Timer DB] in g_db
+  group g_cli[Command Line Interface] in g_ACF
  
 
   service web(server)[Web UI] in g_ui
@@ -31,6 +32,7 @@ architecture-beta
   service opal_client(server)[OPAL_Client] in g_opa
   service opa_policy_repo(server)[Policy Repo] in g_opa_policy
   service redis(server)[Redis] in g_redis
+  service agent_cli(cloud)[Agent CLI] in g_cli
 
 
   junction j_db in g_db
@@ -51,3 +53,5 @@ architecture-beta
   j_db:R --> L:redis
   j_llm:L --> R:rag
   j_llm:T --> R:orchestration
+  agent_cli:R --> L:agent
+  agent_cli:L --> T:entraid
