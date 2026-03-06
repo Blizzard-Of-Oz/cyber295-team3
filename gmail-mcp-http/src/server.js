@@ -9,6 +9,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { ImmuDBLogger } from "./immudb-logger.js";
 import { createDemoRouter } from "./demo.js";
 import { DemoRequestIdGenerator, AccountLockManager } from "./demo-utils.js";
+import { RateLimiter, parseRateLimitConfig } from "./rate-limiter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -377,6 +378,21 @@ const immudbLogger = new ImmuDBLogger({
   enabled: process.env.IMMUDB_ENABLED !== "false"
 });
 
+const rateLimiter = new RateLimiter(parseRateLimitConfig(process.env));
+
+// Log rate limiter configuration for debugging
+if (DEBUG) {
+  console.log("[Server] Rate Limiter Configuration:", {
+    enabled: rateLimiter.enabled,
+    redisHost: rateLimiter.redisHost,
+    redisPort: rateLimiter.redisPort,
+    redisUsername: rateLimiter.redisUsername ? "****" : undefined,
+    redisPassword: rateLimiter.redisPassword ? "****" : undefined,
+    limits: rateLimiter.limits,
+    defaultLimits: rateLimiter.defaultLimits
+  });
+}
+
 const mcpClientManager = new McpClientManager();
 
 // Mount demo routes if enabled (default: enabled in dev environments)
@@ -404,6 +420,99 @@ app.get("/tools", async (_req, res) => {
   }
 });
 
+// Rate limit status endpoint (for debugging/monitoring)
+app.get("/rate-limit/status", async (req, res) => {
+  try {
+    const scope = req.query.scope || "identity";
+    const value = req.query.value || getAuthenticatedUser(req);
+    const action = req.query.action;
+
+    if (!action) {
+      return res.status(400).json({ error: "action query parameter is required" });
+    }
+
+    const status = await rateLimiter.getStatus(scope, value, action);
+    res.json(status);
+  } catch (error) {
+    debugLog("Failed to get rate limit status", { error: error?.message || error });
+    res.status(500).json({ error: error?.message || "Failed to get rate limit status" });
+  }
+});
+
+// Reset rate limit endpoint (for testing/admin purposes)
+// Only available when ENABLE_DEMO_ROUTES is true
+if (ENABLE_DEMO_ROUTES) {
+  app.post("/rate-limit/reset", async (req, res) => {
+    try {
+      const { scope, value, action } = req.body || {};
+
+      if (!scope || !value || !action) {
+        return res.status(400).json({ error: "scope, value, and action are required in request body" });
+      }
+
+      await rateLimiter.resetLimit(scope, value, action);
+      res.json({ success: true, message: `Rate limit reset for ${scope}:${value}:${action}` });
+    } catch (error) {
+      debugLog("Failed to reset rate limit", { error: error?.message || error });
+      res.status(500).json({ error: error?.message || "Failed to reset rate limit" });
+    }
+  });
+
+  // Debug endpoint - check Redis connection and rate limit keys
+  app.get("/rate-limit/debug", async (req, res) => {
+    try {
+      const debugInfo = {
+        rateLimiterEnabled: rateLimiter.enabled,
+        redisConnected: rateLimiter.client?.isOpen,
+        redisHost: rateLimiter.redisHost,
+        redisPort: rateLimiter.redisPort,
+        limits: rateLimiter.limits,
+        defaultLimits: rateLimiter.defaultLimits
+      };
+
+      // Try to connect if not already connected
+      if (!rateLimiter.client?.isOpen) {
+        try {
+          await rateLimiter.connect();
+          debugInfo.redisConnected = rateLimiter.client?.isOpen;
+        } catch (err) {
+          debugInfo.connectionError = err.message;
+        }
+      }
+
+      // Try to get keys from Redis
+      if (rateLimiter.client?.isOpen) {
+        try {
+          const keys = await rateLimiter.client.keys("ratelimit:*");
+          debugInfo.rateLimitKeys = {
+            total: keys.length,
+            sample: keys.slice(0, 10),
+            allKeys: keys
+          };
+
+          // Get values for sample keys
+          if (keys.length > 0) {
+            const sampleKeys = keys.slice(0, 5);
+            debugInfo.sampleKeyValues = {};
+            for (const key of sampleKeys) {
+              const value = await rateLimiter.client.get(key);
+              const ttl = await rateLimiter.client.ttl(key);
+              debugInfo.sampleKeyValues[key] = { value, ttl };
+            }
+          }
+        } catch (err) {
+          debugInfo.keyQueryError = err.message;
+        }
+      }
+
+      res.json(debugInfo);
+    } catch (error) {
+      debugLog("Failed to get rate limit debug info", { error: error?.message || error });
+      res.status(500).json({ error: error?.message || "Failed to get debug info" });
+    }
+  });
+}
+
 app.post("/call-tool", async (req, res) => {
   const startedAt = Date.now();
   const correlationId = getCorrelationId(req);
@@ -427,6 +536,57 @@ app.post("/call-tool", async (req, res) => {
     });
     if (!name || !args) {
       return res.status(400).json({ error: "name and arguments are required" });
+    }
+
+    // Check rate limit across multiple scopes
+    const ip = getRequesterIp(req);
+    const userAgent = req.headers["user-agent"] || "unknown";
+    
+    const rateLimitChecks = [
+      { scope: "identity", value: authenticatedUser },
+      { scope: "ip", value: ip },
+      { scope: "useragent", value: userAgent }
+    ];
+    
+    const rateLimitResult = await rateLimiter.checkMultiple(rateLimitChecks, name);
+    
+    // Set headers from the most restrictive limit (the one that was violated or has least remaining)
+    const mostRestrictive = rateLimitResult.results
+      .filter(r => r.limit) // Only consider configured limits
+      .sort((a, b) => {
+        // Prioritize violated limits
+        if (a.allowed !== b.allowed) return a.allowed ? 1 : -1;
+        // Then by remaining count
+        return (a.remaining || 0) - (b.remaining || 0);
+      })[0];
+    
+    if (mostRestrictive && mostRestrictive.limit) {
+      res.set("x-ratelimit-limit", mostRestrictive.limit);
+      res.set("x-ratelimit-remaining", mostRestrictive.remaining || 0);
+      res.set("x-ratelimit-window", mostRestrictive.window);
+      res.set("x-ratelimit-scope", mostRestrictive.scope);
+      if (mostRestrictive.resetIn) {
+        res.set("x-ratelimit-reset", mostRestrictive.resetIn);
+      }
+    }
+    
+    if (!rateLimitResult.allowed) {
+      const violated = rateLimitResult.violated;
+      debugLog("Rate limit exceeded", { 
+        name, 
+        authenticatedUser, 
+        scope: violated.scope,
+        reason: violated.reason 
+      });
+      return res.status(429).json({
+        error: "Rate limit exceeded",
+        scope: violated.scope,
+        reason: violated.reason,
+        limit: violated.limit,
+        window: violated.window,
+        resetIn: violated.resetIn,
+        message: `Rate limit exceeded for scope '${violated.scope}'. Limit: ${violated.limit} requests per ${violated.window} seconds. Try again in ${violated.resetIn} seconds.`
+      });
     }
 
     const opaDecision = await callOpaDecision(req, name, args);
@@ -598,5 +758,6 @@ const server = app.listen(port, () => {
 
 process.on("SIGINT", async () => {
   await mcpClientManager.close();
+  await rateLimiter.close();
   server.close(() => process.exit(0));
 });

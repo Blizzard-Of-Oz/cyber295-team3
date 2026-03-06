@@ -5,37 +5,49 @@ config:
 architecture-beta
 
   group g_ACF[Agent Credential Firewall System]
+  group g_db[Databases] in g_ACF
   group g_ui(internet) [Web UI] in g_ACF
   group g_entraid(internet) [Azure]
   group g_llms(internet)[LLMs]
   group g_mcp[System Backend] in g_ACF
-  group g_db[Audit Log] in g_ACF
+  group g_audilogdb[Audit Log] in g_db
   group g_opa[Policy Server] in g_ACF
   group g_ext(internet)[External Services]
   group g_opa_policy(internet)[OPA Policy Repo]
+  group g_redis[Action Timer DB] in g_db
+ 
 
   service web(server)[Web UI] in g_ui
   service entraid(server)[Entra ID] in g_entraid
   service agent(brain)[Agent_Orchestrator] in g_ui
+  service rag(database)[RAG Vector Store] in g_llms
   service orchestration(brain)[OpenAI API] in g_llms
   service http_wrapper(server)[HTTP Wrapper] in g_mcp
   service mcp(server)[GongRzhe_fldc Gmail MCP Server] in g_mcp
   service extsvc(cloud)[Gmail API] in g_ext
-  service auditlog(database)[ImmuDB] in g_db
+  service auditlog(database)[ImmuDB] in g_audilogdb
   service opa(server)[Open Policy Agent] in g_opa
   service opal_server(server)[OPAL_Server] in g_opa
   service opal_client(server)[OPAL_Client] in g_opa
   service opa_policy_repo(server)[Policy Repo] in g_opa_policy
+  service redis(server)[Redis] in g_redis
 
+
+  junction j_db in g_db
+  junction j_llm in g_llms
 
   web:L --> R:entraid
   web:T --> B:agent
-  agent:T --> B:orchestration
+  agent:T -- B:j_llm
   agent:R --> L:http_wrapper
   http_wrapper:R --> L:mcp
-  http_wrapper:B --> T:auditlog
   http_wrapper:T --> B:opa
   mcp:R --> L:extsvc
   opa_policy_repo:L --> R:opal_server
   opal_client:B --> T:opa
   opal_server:L --> R:opal_client
+  http_wrapper:B -- T:j_db
+  j_db:L --> R:auditlog
+  j_db:R --> L:redis
+  j_llm:L --> R:rag
+  j_llm:T --> R:orchestration
