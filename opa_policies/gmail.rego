@@ -539,14 +539,26 @@ stego_detected if {
 
 # ---------------------------------------------------------
 # UC28 — DNS tunneling via email links (entropy/length/base64)
-# ---------------------------------------------------------
 dns_tunneling_url if {
   thresh := object.get(cfg, "subdomain_entropy_threshold", 4.5)
   some u in urls
   entropy := object.get(u, "subdomain_entropy", 0.0)
   slen := object.get(u, "subdomain_length", 0)
   looks_b64 := object.get(u, "looks_base64", false)
-  (slen > 32) or (entropy >= thresh) or looks_b64
+  slen > 32
+}
+# ---------------------------------------------------------
+dns_tunneling_url if {
+  thresh := object.get(cfg, "subdomain_entropy_threshold", 4.5)
+  some u in urls
+  entropy := object.get(u, "subdomain_entropy", 0.0)
+  entropy >= thresh
+}
+dns_tunneling_url if {
+  thresh := object.get(cfg, "subdomain_entropy_threshold", 4.5)
+  some u in urls
+  looks_b64 := object.get(u, "looks_base64", false)
+  looks_b64
 }
 
 # ---------------------------------------------------------
@@ -589,10 +601,14 @@ cloud_forwarding_detected if {
 multi_stage_payload if {
   some u in urls
   redirects := object.get(u, "redirects", 0)
-  serves_exec := object.get(u, "serves_executable", false)
-  redirects > 2 or serves_exec
+  redirects > 2
 }
 
+multi_stage_payload if {
+  some u in urls
+  serves_exec := object.get(u, "serves_executable", false)
+  serves_exec
+}
 # ---------------------------------------------------------
 # UC33 — LOLBin instructions (gateway flag)
 # ---------------------------------------------------------
@@ -603,9 +619,20 @@ lolbin_detected if {
 # ---------------------------------------------------------
 # UC34 — OAuth phishing (gateway analysis)
 # ---------------------------------------------------------
+
 oauth_phishing if {
   object.get(oauth, "detected", false)
-  (not object.get(oauth, "approved_client", true) or object.get(oauth, "high_risk_scopes", false) or not object.get(oauth, "redirect_trusted", true))
+  not object.get(oauth, "approved_client", true)
+}
+
+oauth_phishing if {
+  object.get(oauth, "detected", false)
+  object.get(oauth, "high_risk_scopes", false)
+}
+
+oauth_phishing if {
+  object.get(oauth, "detected", false)
+  not object.get(oauth, "redirect_trusted", true)
 }
 
 # ---------------------------------------------------------
@@ -887,7 +914,19 @@ actions[a] if {
 
 actions[a] if {
   decision_outcome == "DENY"
-  (after_hours_bulk_exfil or departing_employee_exfil or oauth_phishing)
+  after_hours_bulk_exfil
+  a := "LOCK_ACCOUNT"
+}
+
+actions[a] if {
+  decision_outcome == "DENY"
+  departing_employee_exfil
+  a := "LOCK_ACCOUNT"
+}
+
+actions[a] if {
+  decision_outcome == "DENY"
+  oauth_phishing
   a := "LOCK_ACCOUNT"
 }
 
@@ -932,3 +971,4 @@ decision = {
   "policy_version": cfg.policy_version,
   "triggered_controls": sort([c | triggered_controls[c]])
 }
+
