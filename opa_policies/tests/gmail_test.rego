@@ -2,6 +2,10 @@ package gmail_test
 
 import future.keywords
 
+# =========================================================
+# EXISTING TESTS
+# =========================================================
+
 # ========== ALLOW CASES ==========
 
 # Allow basic internal email with internal recipients, working hours, trusted sender
@@ -896,4 +900,746 @@ test_record_count_exactly_100 if {
   result := data.gmail.decision with input as test_input
   not result.allow
   "bulk_customer_export_detected" in result.triggered_controls
+}
+
+# =========================================================
+# NEW TESTS FOR ADDED USE CASES IN gmail.rego
+# =========================================================
+
+# ========== UC8 — CONFIDENTIAL KEYWORD BLOCK ==========
+test_deny_confidential_keyword_external if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong+allow1@gmail.com"],
+      "content_text": "Please review the unreleased product roadmap.",
+      "user_input": "Send externally",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "subject": "unreleased product update",
+    }
+  }
+
+  result := data.gmail.decision
+     with input as test_input
+     with data.config.confidential_keywords as ["unreleased product", "acquisition", "layoff plan", "q4 revenue"]
+  result.decision == "DENY"
+}
+
+
+# ========== UC13 — REPLY-ALL BOMB ==========
+test_deny_uc13_reply_all_bomb if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "tool": "email.reply_all",
+      "recipient_count": 1,
+      "recipients": ["thread@company.com"],
+      "content_text": "Replying to giant thread",
+      "user_input": "Reply all",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "thread": {
+        "recipient_count": 80,
+        "reference_ids_valid": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "reply_all_blocked" in result.triggered_controls
+}
+
+# ========== UC14 / UC40 — TYPOSQUAT / HOMOGLYPH ==========
+test_deny_uc14_typosquat if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["support@company.com"],
+      "content_text": "Normal email",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "domain_risk": {
+        "typosquat_suspected": true,
+        "homoglyph_suspected": false,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "typosquat_or_homoglyph_detected" in result.triggered_controls
+}
+
+test_deny_uc40_homoglyph if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["support@company.com"],
+      "content_text": "Normal email",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "domain_risk": {
+        "typosquat_suspected": false,
+        "homoglyph_suspected": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "typosquat_or_homoglyph_detected" in result.triggered_controls
+}
+
+# ========== UC15 — TEMPORAL MISMATCH ==========
+test_deny_uc15_temporal_mismatch if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Normal email",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "temporal": {
+        "user_active_at_claimed_time": false,
+        "device_id_matches": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "temporal_mismatch_detected" in result.triggered_controls
+}
+
+# ========== UC16 — THREAD MANIPULATION ==========
+test_deny_uc16_thread_invalid_refs if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Reply in thread",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "thread": {
+        "reference_ids_valid": false,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "thread_reference_invalid" in result.triggered_controls
+}
+
+# ========== UC17 — RECIPIENT LIST POISONING ==========
+test_deny_uc17_recipient_list_poisoned if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["team-list@company.com"],
+      "content_text": "Send to team list",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "recipient_list": {
+        "flagged_external_recipients": ["attacker@evil.com"],
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "recipient_list_poisoned" in result.triggered_controls
+}
+
+# ========== UC18 — FORWARDING CHAIN ==========
+test_deny_uc18_forwarding_chain_count if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "tool": "email.forward",
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Forward this",
+      "user_input": "Forward",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "forward_count": 4,
+      "forward_external_hops": 0,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "forwarding_chain_blocked" in result.triggered_controls
+}
+
+test_deny_uc18_forwarding_external_hop if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "tool": "email.forward",
+      "recipient_count": 1,
+      "recipients": ["personal@gmail.com"],
+      "content_text": "Forward this",
+      "user_input": "Forward",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "forward_count": 1,
+      "forward_external_hops": 1,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "forwarding_chain_blocked" in result.triggered_controls
+}
+
+# ========== UC19 — BCC ABUSE ==========
+test_deny_uc19_bcc_abuse_role if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "cc": [],
+      "bcc": ["hidden@company.com"],
+      "content_text": "Hidden copy",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "bcc_abuse_blocked" in result.triggered_controls
+}
+
+test_deny_uc19_bcc_external if {
+  test_input := {
+    "requester": {"identity": "jdoe@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "bcc": ["hidden@gmail.com"],
+      "content_text": "Hidden external copy",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "bcc_abuse_blocked" in result.triggered_controls
+}
+
+# ========== UC20 — RECALL RACE ==========
+test_deny_uc20_recall_race if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Retry send",
+      "user_input": "Send again",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "recalled_recently": true,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "recall_race_detected" in result.triggered_controls
+}
+
+# ========== UC21 — ATTACHMENT SPOOFING ==========
+test_deny_uc21_attachment_spoofing if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Attachment",
+      "user_input": "Send file",
+      "attachment_bytes": 5000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "file_ext": ".pdf",
+          "actual_ext": ".exe",
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "attachment_extension_mismatch" in result.triggered_controls
+}
+
+# ========== UC22 — SEND-AS / DELEGATION APPROVAL ==========
+test_require_approval_uc22_protected_send_as if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Send as CFO",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "send_as": "cfo@company.com",
+      "delegation": {"allowed": true},
+      "approval": {"token": ""},
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "REQUIRE_APPROVAL"
+  "REQUEST_APPROVAL" in result.actions
+}
+
+test_require_approval_uc22_invalid_delegation if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Send as another mailbox",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "send_as": "shared@company.com",
+      "delegation": {"allowed": false},
+      "approval": {"token": ""},
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "REQUIRE_APPROVAL"
+  "REQUEST_APPROVAL" in result.actions
+}
+
+# ========== UC23 — LANGUAGE ANOMALY ==========
+test_warn_uc23_language_anomaly if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Correo en español",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "language": {
+        "detected": "es",
+        "seen_before": false,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "WARN"
+  "REQUEST_USER_CONFIRMATION" in result.actions
+  "language_anomaly_warn" in result.triggered_controls
+}
+
+# ========== UC24 — CALENDAR INVITE INJECTION ==========
+test_deny_uc24_calendar_malicious if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Meeting invite",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "calendar": {
+        "ics_detected": true,
+        "malicious": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "calendar_invite_malicious" in result.triggered_controls
+}
+
+# ========== UC25 — EMAIL AUTH FAILURE ==========
+test_deny_uc25_email_auth_failed if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong+allow1@gmail.com"],
+      "content_text": "Send externally",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "auth": {
+        "spf_pass": false,
+        "dkim_pass": true,
+        "dmarc_pass": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "email_auth_failed" in result.triggered_controls
+}
+
+# ========== UC26 — URGENCY MANIPULATION ==========
+test_throttle_uc26_urgency_manipulation if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Normal content",
+      "user_input": "Send now",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "urgency_manipulation": true,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "THROTTLE"
+  "ENFORCE_COOLDOWN" in result.actions
+}
+
+# ========== UC27 — STEGO ==========
+test_deny_uc27_stego_detected if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Image",
+      "user_input": "Send image",
+      "attachment_bytes": 1000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "image_stego_score": 0.95,
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "steganography_detected" in result.triggered_controls
+}
+
+# ========== UC28 — DNS TUNNELING URL ==========
+test_deny_uc28_dns_tunneling_entropy if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Click link",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "urls": [
+        {
+          "subdomain_entropy": 5.1,
+          "subdomain_length": 10,
+          "looks_base64": false,
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "dns_tunneling_url_detected" in result.triggered_controls
+}
+
+# ========== UC29 — CHUNKED EXFIL ==========
+test_deny_uc29_chunked_exfil if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["personal@gmail.com"],
+      "content_text": "Small repeated transfer",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "counters": {
+        "emails_to_same_recipient_last_24h": 50,
+        "aggregate_data_volume_to_recipient_24h_bytes": 999999,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "chunked_exfil_detected" in result.triggered_controls
+}
+
+# ========== UC30 — ARCHIVE EXFIL ==========
+test_deny_uc30_archive_prohibited_contents if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Archive",
+      "user_input": "Send archive",
+      "attachment_bytes": 5000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "is_archive": true,
+          "archive_contains_prohibited": true,
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "archive_exfil_detected" in result.triggered_controls
+}
+
+test_deny_uc30_encrypted_archive_external if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["personal@gmail.com"],
+      "content_text": "Encrypted archive",
+      "user_input": "Send archive",
+      "attachment_bytes": 5000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "is_archive": true,
+          "archive_password_protected": true,
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "archive_exfil_detected" in result.triggered_controls
+}
+
+# ========== UC31 — CLOUD FORWARDING ==========
+test_deny_uc31_cloud_forwarding if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Forward to storage",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "cloud_forwarding": {
+        "detected": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "cloud_forwarding_detected" in result.triggered_controls
+}
+
+# ========== UC32 — MULTI-STAGE PAYLOAD ==========
+test_deny_uc32_multi_stage_payload_redirects if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Click link",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "urls": [
+        {
+          "redirects": 5,
+          "serves_executable": false,
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "multi_stage_payload_detected" in result.triggered_controls
+}
+
+# ========== UC33 — LOLBIN ==========
+test_deny_uc33_lolbin_detected if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Use powershell downloadstring",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "lolbin": {
+        "detected": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "lolbin_detected" in result.triggered_controls
+}
+
+# ========== UC34 — OAUTH PHISHING ==========
+test_deny_uc34_oauth_phishing if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Authorize this app",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "oauth": {
+        "detected": true,
+        "approved_client": false,
+        "high_risk_scopes": true,
+        "redirect_trusted": false,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "oauth_phishing_detected" in result.triggered_controls
+  "LOCK_ACCOUNT" in result.actions
+}
+
+# ========== UC37 — VENDOR BEC QUARANTINE ==========
+test_quarantine_uc37_vendor_bec if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Vendor update",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "vendor": {
+        "trusted_vendor_sender": true,
+        "payment_details_mismatch": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "QUARANTINE"
+  "vendor_bec_quarantine" in result.triggered_controls
+  "QUARANTINE_MESSAGE" in result.actions
+}
+
+# ========== UC38 — DEPENDENCY CONFUSION ==========
+test_deny_uc38_dependency_confusion if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Install package from public repo",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "dependency": {
+        "detected": true,
+      },
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "dependency_confusion_detected" in result.triggered_controls
+}
+
+# ========== UC39 — POLYGLOT FILE ==========
+test_deny_uc39_polyglot_file if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Polyglot attachment",
+      "user_input": "Send",
+      "attachment_bytes": 2000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "detected_types": ["application/pdf", "application/zip"],
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "polyglot_file_detected" in result.triggered_controls
 }
