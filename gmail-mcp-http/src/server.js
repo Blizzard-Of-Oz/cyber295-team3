@@ -190,6 +190,75 @@ function unique(array) {
   return [...new Set(array)];
 }
 
+function normalizeAttachmentPaths(args) {
+  const raw = [];
+
+  if (Array.isArray(args?.attachments)) {
+    raw.push(...args.attachments);
+  }
+
+  if (typeof args?.attachmentPath === "string") {
+    raw.push(args.attachmentPath);
+  }
+
+  if (typeof args?.attachment_path === "string") {
+    raw.push(args.attachment_path);
+  }
+
+  return raw
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean);
+}
+
+function deriveAttachmentMetadata(args) {
+  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
+  const explicitName = args?.attachmentName || args?.attachment_name || null;
+  const paths = normalizeAttachmentPaths(args);
+
+  if (paths.length === 0) {
+    return {
+      attachmentBytes: explicitBytes,
+      attachmentName: explicitName,
+      attachmentCount: 0
+    };
+  }
+
+  let totalBytes = 0;
+  const names = [];
+
+  for (const filePath of paths) {
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        totalBytes += stat.size;
+        names.push(path.basename(filePath));
+      }
+    } catch (_error) {
+      // Ignore inaccessible attachment paths; Gmail tool will return explicit send errors.
+    }
+  }
+
+  const mergedBytes = explicitBytes > 0 ? explicitBytes : totalBytes;
+  const mergedName = explicitName || (names.length > 0 ? names.join(",") : null);
+
+  return {
+    attachmentBytes: mergedBytes,
+    attachmentName: mergedName,
+    attachmentCount: paths.length
+  };
+}
+
+function normalizeToolArguments(name, args) {
+  const normalized = args && typeof args === "object" ? { ...args } : {};
+  if (name === "send_email" || name === "draft_email") {
+    const attachments = normalizeAttachmentPaths(normalized);
+    if (attachments.length > 0) {
+      normalized.attachments = unique(attachments);
+    }
+  }
+  return normalized;
+}
+
 // NOTE: Urgency score calculation is now handled by OPA policy, not by this application.
 // OPA uses urgency_keywords from data.json and checks both content_text and user_input.
 
@@ -229,6 +298,8 @@ function buildOpaInput(req, toolName, args) {
   const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
   const userInput = req.body?.context?.userInput || null;
 
+  const attachmentMeta = deriveAttachmentMetadata(args);
+
   const opaInput = {
     tool: {
       name: toolName,
@@ -250,8 +321,9 @@ function buildOpaInput(req, toolName, args) {
       recipients,
       content_text: contentText,
       user_input: userInput,
-      attachment_bytes: Number(args?.attachmentBytes || args?.attachment_bytes || 0),
-      attachment_name: args?.attachmentName || args?.attachment_name || null,
+      attachment_bytes: Number(attachmentMeta.attachmentBytes || 0),
+      attachment_name: attachmentMeta.attachmentName,
+      attachment_count: attachmentMeta.attachmentCount,
       data_classification: args?.dataClassification || args?.data_classification || "none",
       record_count: Number(args?.recordCount || args?.record_count || 0)
     }
@@ -523,6 +595,7 @@ app.post("/call-tool", async (req, res) => {
   let auditErrorMessage = null;
   try {
     const { name, arguments: args } = req.body || {};
+    const normalizedArgs = normalizeToolArguments(name, args);
     const authenticatedUser = getAuthenticatedUser(req);
     if (accountLockManager && accountLockManager.isLocked(authenticatedUser)) {
       return res.status(403).json({ error: "Request denied by policy", reason: "account locked" });
@@ -530,11 +603,11 @@ app.post("/call-tool", async (req, res) => {
     const hasEntraToken = Boolean(req.headers["x-entra-token"]);
     debugLog("Call tool request received", {
       name,
-      hasArgs: Boolean(args),
+      hasArgs: Boolean(normalizedArgs),
       authenticatedUser,
       hasEntraToken
     });
-    if (!name || !args) {
+    if (!name || !normalizedArgs) {
       return res.status(400).json({ error: "name and arguments are required" });
     }
 
@@ -589,11 +662,11 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const opaDecision = await callOpaDecision(req, name, args);
+    const opaDecision = await callOpaDecision(req, name, normalizedArgs);
     const requesterIp = getRequesterIp(req);
-    const targetUserId = deriveTarget(args);
+    const targetUserId = deriveTarget(normalizedArgs);
 
-    const opaRequest = buildOpaInput(req, name, args);
+    const opaRequest = buildOpaInput(req, name, normalizedArgs);
     const requestId = req.body?.request_id || (demoRequestIdGenerator ? demoRequestIdGenerator.nextId() : `Request-${crypto.randomBytes(6).toString("hex")}`);
     immudbLogger
       .recordPolicyDecision({
@@ -672,7 +745,7 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const result = await mcpClientManager.callTool(name, args);
+    const result = await mcpClientManager.callTool(name, normalizedArgs);
     debugLog("Tool call completed", { name });
 
     const toolError = extractToolError(result);
@@ -721,9 +794,10 @@ app.post("/call-tool", async (req, res) => {
     debugLog("Tool call failed", { error: error?.message || error });
     try {
       const { name, arguments: args } = req.body || {};
+      const normalizedArgs = normalizeToolArguments(name, args);
       const authenticatedUser = getAuthenticatedUser(req);
       const requesterIp = getRequesterIp(req);
-      const targetUserId = deriveTarget(args);
+      const targetUserId = deriveTarget(normalizedArgs);
       immudbLogger
         .recordAction({
           authenticatedUser,

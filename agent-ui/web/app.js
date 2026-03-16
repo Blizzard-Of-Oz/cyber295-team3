@@ -4,6 +4,8 @@ const statusEl = document.getElementById("status");
 const summaryEl = document.getElementById("summary");
 const toolCallsEl = document.getElementById("toolCalls");
 const toolOutputsEl = document.getElementById("toolOutputs");
+const attachmentsInput = document.getElementById("attachments");
+const attachmentListEl = document.getElementById("attachmentList");
 const authPrompt = document.getElementById("authPrompt");
 const signinBtn = document.getElementById("signinBtn");
 const signoutBtn = document.getElementById("signoutBtn");
@@ -17,6 +19,81 @@ const csrfRetry = document.getElementById("csrfRetry");
 let isAuthenticated = false;
 let csrfToken = "";
 let cachedUser = null;
+let selectedAttachments = [];
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderAttachmentList() {
+  if (!selectedAttachments.length) {
+    attachmentListEl.textContent = "No files selected";
+    return;
+  }
+
+  const rows = selectedAttachments.map((entry, index) => {
+    const escapedName = escapeHtml(entry.displayName);
+    const escapedSize = escapeHtml(String(entry.displaySizeBytes));
+    return `
+      <div class="attachment-row" data-index="${index}">
+        <div class="attachment-row-title">Attachment ${index + 1}</div>
+        <label>filename</label>
+        <input type="text" class="attachment-name" data-index="${index}" value="${escapedName}" />
+        <label>size (bytes)</label>
+        <input type="number" min="0" step="1" class="attachment-size" data-index="${index}" value="${escapedSize}" />
+      </div>
+    `;
+  });
+  attachmentListEl.innerHTML = rows.join("");
+}
+
+function setAttachmentsFromFiles(files) {
+  selectedAttachments = Array.from(files || []).map((file) => ({
+    file,
+    displayName: file.name,
+    displaySizeBytes: file.size,
+    mimeType: file.type || "application/octet-stream"
+  }));
+  renderAttachmentList();
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function buildAttachmentPayload() {
+  if (!selectedAttachments.length) return [];
+  const payload = [];
+  for (const entry of selectedAttachments) {
+    const contentBase64 = await fileToBase64(entry.file);
+    const parsedDisplaySize = Number(entry.displaySizeBytes);
+    payload.push({
+      name: entry.file.name,
+      size: entry.file.size,
+      mimeType: entry.mimeType,
+      displayName: entry.displayName || entry.file.name,
+      displaySizeBytes: Number.isFinite(parsedDisplaySize) && parsedDisplaySize >= 0
+        ? parsedDisplaySize
+        : entry.file.size,
+      contentBase64
+    });
+  }
+  return payload;
+}
 
 function showAuthPrompt() {
   isAuthenticated = false;
@@ -146,10 +223,11 @@ async function runAgent() {
   toolOutputsEl.textContent = "";
 
   try {
+    const attachments = await buildAttachmentPayload();
     const response = await fetch("/api/assist", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-      body: JSON.stringify({ requirement })
+      body: JSON.stringify({ requirement, attachments })
     });
 
     const data = await response.json();
@@ -165,12 +243,34 @@ async function runAgent() {
     summaryEl.textContent = data.summary || "(no summary)";
     toolCallsEl.textContent = JSON.stringify(data.toolCalls || [], null, 2);
     toolOutputsEl.textContent = JSON.stringify(data.toolOutputs || [], null, 2);
-    statusEl.textContent = "Done";
+    if (Array.isArray(data.attachmentPathsUsed) && data.attachmentPathsUsed.length > 0) {
+      statusEl.textContent = `Done (attachments: ${data.attachmentPathsUsed.length})`;
+    } else {
+      statusEl.textContent = "Done";
+    }
   } catch (error) {
     statusEl.textContent = error.message || "Error";
     summaryEl.textContent = "";
   }
 }
+
+attachmentsInput?.addEventListener("change", () => {
+  setAttachmentsFromFiles(attachmentsInput.files);
+});
+
+attachmentListEl?.addEventListener("input", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  const index = Number(target.dataset.index);
+  if (!Number.isInteger(index) || index < 0 || index >= selectedAttachments.length) return;
+
+  if (target.classList.contains("attachment-name")) {
+    selectedAttachments[index].displayName = target.value;
+  }
+  if (target.classList.contains("attachment-size")) {
+    selectedAttachments[index].displaySizeBytes = target.value;
+  }
+});
 
 runButton.addEventListener("click", runAgent);
 
@@ -212,3 +312,4 @@ csrfRetry.addEventListener("click", async () => {
 
 checkHealth();
 setInterval(checkHealth, 5000);
+setAttachmentsFromFiles(attachmentsInput?.files || []);

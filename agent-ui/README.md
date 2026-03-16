@@ -84,3 +84,5 @@ Open http://localhost:3300 in your browser.
 
 - Ensure Gmail OAuth credentials exist as described in the Gmail MCP server README.
 - The MCP server is launched via stdio by the agent process.
+- Web UI now supports attachment upload in the request form. Uploaded files are written to a per-request temp folder on the agent host and removed after request completion.
+- You can also pass host file paths in API requests via `attachmentPaths` (array of absolute paths) when calling `POST /api/assist`.

@@ -8,6 +8,17 @@ This service wraps the Gmail MCP stdio server and exposes HTTP endpoints, while 
 - GET /tools
 - POST /call-tool
 
+### Attachment Context for Policy
+
+For `send_email` and `draft_email`, the wrapper now normalizes attachment inputs and enriches OPA context:
+
+- Accepts `attachments` (array of file paths), `attachmentPath`, or `attachment_path`
+- Computes `context.attachment_bytes` from existing local files when explicit byte values are not provided
+- Sets `context.attachment_name` from attachment filenames when not explicitly provided
+- Adds `context.attachment_count`
+
+This prevents attachment fields from remaining `0`/`null` when file-path attachments are supplied.
+
 ## Setup
 
 1. Build the Gmail MCP server:

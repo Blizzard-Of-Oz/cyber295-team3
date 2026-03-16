@@ -133,6 +133,17 @@ npm --silent run cli -- --json "search emails" 2>/dev/null | jq '.summary'
 npm run cli "Send an email to sarah@company.com with subject 'Project Update' and body 'The project is on track'"
 ```
 
+### Send With Attachment Files
+```bash
+npm run cli -- --attach /tmp/report.pdf "send this report to sarah@company.com"
+npm run cli -- --attach /tmp/a.txt --attach /tmp/b.csv "draft an update email with attachments"
+```
+
+You can also provide persistent attachment paths via environment variable:
+```bash
+ATTACHMENT_PATHS=/tmp/report.pdf,/tmp/screenshot.png npm run cli -- "send the status update with attachments"
+```
+
 ### Search Emails
 ```bash
 npm run cli "Find all emails from john@example.com from the last week"
@@ -186,6 +197,7 @@ DEBUG=true node src/cli.js --json "your request" 2>/dev/null | jq '.'
 - It connects to the same MCP HTTP server
 - Authentication can be controlled via the `AUTHENTICATED_USER` environment variable
 - Each request gets a unique correlation ID for tracking
+- For `send_email` and `draft_email`, attachment paths passed with `--attach` or `ATTACHMENT_PATHS` are available to the agent and forwarded as Gmail MCP `attachments`.
 
 ## Quick jq Reference
 
