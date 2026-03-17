@@ -29,11 +29,6 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     output("---");
   };
 
-  function userAskedForAttachment(text) {
-    if (typeof text !== "string") return false;
-    return /(attach|attachment|attached|enclose|include\s+file)/i.test(text);
-  }
-
   function normalizeAttachmentMetadata(context) {
     if (!Array.isArray(context?.availableAttachmentMetadata)) return [];
     return context.availableAttachmentMetadata
@@ -272,15 +267,10 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
           ? JSON.parse(call.function.arguments)
           : {};
 
-        // Expand attachment paths to include all uploaded files for send/draft actions.
+        // Always propagate uploaded WebUI attachments for send/draft tools so they are not dropped.
         if (
           (name === "send_email" || name === "draft_email") &&
-          availableAttachmentPaths.length > 0 &&
-          (
-            userAskedForAttachment(requirement) ||
-            (Array.isArray(args.attachments) && args.attachments.length > 0) ||
-            typeof args.attachments === "string"
-          )
+          availableAttachmentPaths.length > 0
         ) {
           const resolvedRequested = resolveAttachmentPathAliases(
             args.attachments,
