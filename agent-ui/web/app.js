@@ -62,6 +62,14 @@ function setAttachmentsFromFiles(files) {
   renderAttachmentList();
 }
 
+function clearAttachments() {
+  selectedAttachments = [];
+  if (attachmentsInput) {
+    attachmentsInput.value = "";
+  }
+  renderAttachmentList();
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -251,6 +259,8 @@ async function runAgent() {
   } catch (error) {
     statusEl.textContent = error.message || "Error";
     summaryEl.textContent = "";
+  } finally {
+    clearAttachments();
   }
 }
 
