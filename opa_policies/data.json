@@ -57,6 +57,19 @@
       "bz2",
       "xz"
     ],
+    "archive_policy": {
+      "blocked_file_types": [
+        ".sql", 
+        ".db", 
+        ".mdb", 
+        ".csv"
+      ],
+      "min_blocked_type_matches": 1,
+      "max_file_count": 1000,
+      "block_password_protected": true,
+      "password_protected_requires_external": true,
+      "max_compression_ratio": 100.0
+    },
     "personal_domains": [
       "gmail.com",
       "outlook.com",

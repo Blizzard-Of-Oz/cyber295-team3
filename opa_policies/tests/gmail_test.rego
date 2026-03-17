@@ -768,6 +768,7 @@ test_lock_account_and_alert_departing_employee if {
 test_lock_account_bulk_exfil if {
   test_input := {
     "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "timestamp": 43200000000000,
     "context": {
       "recipient_count": 1,
       "recipients": ["personal@outlook.com"],
@@ -1435,8 +1436,14 @@ test_deny_uc30_archive_prohibited_contents if {
       "record_count": 0,
       "attachments": [
         {
-          "is_archive": true,
-          "archive_contains_prohibited": true,
+          "file_ext": "zip",
+          "actual_ext": "zip",
+          "archive": {
+            "contains_file_types": ["sql", "txt"],
+            "file_count": 2,
+            "password_protected": false,
+            "compression_ratio": 2.0,
+          },
         },
       ],
     }
@@ -1460,8 +1467,14 @@ test_deny_uc30_encrypted_archive_external if {
       "record_count": 0,
       "attachments": [
         {
-          "is_archive": true,
-          "archive_password_protected": true,
+          "file_ext": "zip",
+          "actual_ext": "zip",
+          "archive": {
+            "contains_file_types": ["pdf"],
+            "file_count": 3,
+            "password_protected": true,
+            "compression_ratio": 1.5,
+          },
         },
       ],
     }

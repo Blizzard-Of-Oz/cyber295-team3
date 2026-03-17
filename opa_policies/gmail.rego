@@ -577,6 +577,25 @@ chunked_exfil if {
 # ---------------------------------------------------------
 # UC30 — Compressed archive exfiltration (gateway flags)
 # ---------------------------------------------------------
+archive_policy := object.get(cfg, "archive_policy", {})
+
+archive_blocked_file_types := exts if {
+  configured := object.get(archive_policy, "blocked_file_types", ["exe", "dll", "js", "vbs", "ps1", "bat", "cmd", "scr", "jar"])
+  exts := {normalized |
+    some ext in configured
+    type_name(ext) == "string"
+    ext_lower := lower(ext)
+    normalized := trim_prefix(ext_lower, ".")
+    normalized != ""
+  }
+}
+
+archive_min_blocked_type_matches := object.get(archive_policy, "min_blocked_type_matches", 1)
+archive_max_file_count := object.get(archive_policy, "max_file_count", 1000)
+archive_max_compression_ratio := object.get(archive_policy, "max_compression_ratio", 15.0)
+archive_block_password_protected := object.get(archive_policy, "block_password_protected", true)
+archive_password_protected_requires_external := object.get(archive_policy, "password_protected_requires_external", true)
+
 archive_extension_set := exts if {
   configured := object.get(cfg, "archive_extensions", ["zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz"])
   exts := {normalized |
@@ -597,15 +616,67 @@ attachment_is_archive(a) if {
   actual in archive_extension_set
 }
 
+archive_contains_file_types_for_attachment(a) := types if {
+  archive_obj := object.get(a, "archive", {})
+  raw_types := object.get(archive_obj, "contains_file_types", [])
+  types := [normalized |
+    some t in raw_types
+    type_name(t) == "string"
+    t_lower := lower(t)
+    normalized := trim_prefix(t_lower, ".")
+    normalized != ""
+  ]
+}
+
+archive_file_count_for_attachment(a) := object.get(object.get(a, "archive", {}), "file_count", 0)
+
+archive_password_protected_for_attachment(a) if {
+  object.get(object.get(a, "archive", {}), "password_protected", false)
+} else if {
+  # Backward compatibility with legacy flat metadata field
+  object.get(a, "archive_password_protected", false)
+}
+
+archive_compression_ratio_for_attachment(a) := object.get(object.get(a, "archive", {}), "compression_ratio", 0)
+
+archive_contains_prohibited_for_attachment(a) if {
+  types := archive_contains_file_types_for_attachment(a)
+  blocked := {t |
+    some t in types
+    t in archive_blocked_file_types
+  }
+  count(blocked) >= archive_min_blocked_type_matches
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  file_count := archive_file_count_for_attachment(a)
+  type_name(file_count) == "number"
+  file_count > archive_max_file_count
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  archive_block_password_protected
+  archive_password_protected_for_attachment(a)
+  not archive_password_protected_requires_external
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  archive_block_password_protected
+  archive_password_protected_for_attachment(a)
+  archive_password_protected_requires_external
+  any_external_domain
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  ratio := archive_compression_ratio_for_attachment(a)
+  type_name(ratio) == "number"
+  ratio >= archive_max_compression_ratio
+}
+
 archive_exfil if {
   some a in attachments
   attachment_is_archive(a)
-  object.get(a, "archive_contains_prohibited", false)
-} else if {
-  some a in attachments
-  attachment_is_archive(a)
-  object.get(a, "archive_password_protected", false)
-  any_external_domain
+  archive_contains_prohibited_for_attachment(a)
 }
 
 # ---------------------------------------------------------
