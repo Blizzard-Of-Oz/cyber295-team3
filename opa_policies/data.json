@@ -47,6 +47,16 @@
       "forward finance emails"
     ],
     "after_hours_attachment_limit_bytes": 1000000,
+    "archive_extensions": [
+      "zip",
+      "7z",
+      "rar",
+      "tar",
+      "gz",
+      "tgz",
+      "bz2",
+      "xz"
+    ],
     "personal_domains": [
       "gmail.com",
       "outlook.com",

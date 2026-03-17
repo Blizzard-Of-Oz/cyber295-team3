@@ -29,6 +29,87 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     output("---");
   };
 
+  function userAskedForAttachment(text) {
+    if (typeof text !== "string") return false;
+    return /(attach|attachment|attached|enclose|include\s+file)/i.test(text);
+  }
+
+  function normalizeAttachmentMetadata(context) {
+    if (!Array.isArray(context?.availableAttachmentMetadata)) return [];
+    return context.availableAttachmentMetadata
+      .map((entry) => {
+        const path = typeof entry?.path === "string" ? entry.path.trim() : "";
+        if (!path) return null;
+        const displayName =
+          typeof entry?.displayName === "string" && entry.displayName.trim().length > 0
+            ? entry.displayName.trim()
+            : path;
+        const size = Number(entry?.displaySizeBytes);
+        return {
+          path,
+          displayName,
+          displaySizeBytes: Number.isFinite(size) && size >= 0 ? size : 0
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function applyAttachmentOpaOverrides(args, attachmentMetadata) {
+    if (!Array.isArray(attachmentMetadata) || attachmentMetadata.length === 0) return;
+    const names = attachmentMetadata.map((entry) => entry.displayName).filter(Boolean);
+    const totalBytes = attachmentMetadata.reduce(
+      (sum, entry) => sum + Number(entry.displaySizeBytes || 0),
+      0
+    );
+
+    if (args.attachmentName === undefined && args.attachment_name === undefined && names.length > 0) {
+      args.attachmentName = names.join(",");
+    }
+    if (args.attachmentBytes === undefined && args.attachment_bytes === undefined) {
+      args.attachmentBytes = totalBytes;
+    }
+  }
+
+  function uniqueAttachmentPaths(values) {
+    if (!Array.isArray(values)) return [];
+    return [...new Set(values.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim()))];
+  }
+
+  function resolveAttachmentPathAliases(attachments, availableAttachmentPaths, availableAttachmentMetadata) {
+    const available = uniqueAttachmentPaths(availableAttachmentPaths);
+    const byAlias = new Map();
+
+    for (const fullPath of available) {
+      byAlias.set(fullPath.toLowerCase(), fullPath);
+      const baseName = fullPath.split(/[\\/]/).pop();
+      if (baseName) byAlias.set(baseName.toLowerCase(), fullPath);
+    }
+
+    for (const meta of availableAttachmentMetadata || []) {
+      const fullPath = typeof meta?.path === "string" ? meta.path.trim() : "";
+      if (!fullPath) continue;
+      const displayName = typeof meta?.displayName === "string" ? meta.displayName.trim() : "";
+      if (displayName) byAlias.set(displayName.toLowerCase(), fullPath);
+    }
+
+    const requested = Array.isArray(attachments)
+      ? attachments
+      : typeof attachments === "string"
+        ? [attachments]
+        : [];
+
+    const resolved = [];
+    for (const item of requested) {
+      if (typeof item !== "string") continue;
+      const key = item.trim().toLowerCase();
+      if (!key) continue;
+      const resolvedPath = byAlias.get(key);
+      if (resolvedPath) resolved.push(resolvedPath);
+    }
+
+    return uniqueAttachmentPaths(resolved);
+  }
+
   async function run(requirement, context = {}) {
     if (!openai.apiKey) {
       throw new Error("OPENAI_API_KEY is not set");
@@ -102,6 +183,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
       "1. If the user mentions 'tickets', 'issues', 'incidents', 'problems', or 'support requests': Refer to the knowledge base context.",
       "2. If the user explicitly says 'search emails', 'check inbox', 'find in Gmail', or 'email search': Use email tools.",
       "3. Be precise with recipients, subjects, and email contents when sending emails.",
+      "3a. For send_email and draft_email, always use the `attachments` field as an array of local file paths when attachments are requested.",
       "4. If the user asks something not covered in the knowledge base and clarifies it's about emails, then search emails.",
       "5. If data is missing and ambiguous, ask for clarification rather than guessing."
     ].join(" ");
@@ -124,6 +206,33 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     }
 
     messages.push({ role: "user", content: requirement });
+
+    const availableAttachmentPaths = Array.isArray(context.availableAttachmentPaths)
+      ? context.availableAttachmentPaths.filter((v) => typeof v === "string" && v.trim().length > 0)
+      : [];
+    if (availableAttachmentPaths.length > 0) {
+      messages.push({
+        role: "system",
+        content:
+          "Attachment context: The following local files are pre-approved and available on the agent host for this request. " +
+          "If the user asks to send/draft with attachment(s), pass these exact file paths in send_email/draft_email `attachments`. " +
+          `Available paths: ${availableAttachmentPaths.join(", ")}`
+      });
+    }
+
+    const availableAttachmentMetadata = normalizeAttachmentMetadata(context);
+    if (availableAttachmentMetadata.length > 0) {
+      const details = availableAttachmentMetadata
+        .map((entry) => `${entry.path} [displayName=${entry.displayName}; displaySizeBytes=${entry.displaySizeBytes}]`)
+        .join(" | ");
+      messages.push({
+        role: "system",
+        content:
+          "Attachment demo metadata: when sending/drafting emails with attachments, include OPA policy fields " +
+          "`attachmentName` and `attachmentBytes` using these display values (not filesystem size). " +
+          `Metadata: ${details}`
+      });
+    }
 
     const toolOutputs = [];
     const allToolCalls = [];
@@ -162,12 +271,51 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
         const args = call.function?.arguments
           ? JSON.parse(call.function.arguments)
           : {};
+
+        // Expand attachment paths to include all uploaded files for send/draft actions.
+        if (
+          (name === "send_email" || name === "draft_email") &&
+          availableAttachmentPaths.length > 0 &&
+          (
+            userAskedForAttachment(requirement) ||
+            (Array.isArray(args.attachments) && args.attachments.length > 0) ||
+            typeof args.attachments === "string"
+          )
+        ) {
+          const resolvedRequested = resolveAttachmentPathAliases(
+            args.attachments,
+            availableAttachmentPaths,
+            availableAttachmentMetadata
+          );
+          args.attachments = uniqueAttachmentPaths([
+            ...resolvedRequested,
+            ...availableAttachmentPaths
+          ]);
+          debugLog("Expanded attachments for email action", {
+            name,
+            attachmentCount: args.attachments.length
+          });
+        }
+
+        if (name === "send_email" || name === "draft_email") {
+          const metadataByPath = new Map(
+            availableAttachmentMetadata.map((entry) => [entry.path, entry])
+          );
+          const attachedPaths = Array.isArray(args.attachments)
+            ? args.attachments.filter((v) => typeof v === "string" && v.trim().length > 0)
+            : [];
+          const attachedMetadata = attachedPaths
+            .map((p) => metadataByPath.get(p))
+            .filter(Boolean);
+          applyAttachmentOpaOverrides(args, attachedMetadata);
+        }
+
         debugLog("Calling MCP tool", { name });
         try {
           const result = await mcpClientManager.callTool(name, args, context);
           debugLog("MCP tool result", { name, ok: true });
           toolOutputs.push({ name, result });
-          allToolCalls.push({ name, arguments: call.function?.arguments || "{}" });
+          allToolCalls.push({ name, arguments: JSON.stringify(args) });
 
           messages.push({
             role: "tool",
@@ -183,7 +331,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
           };
           debugLog("MCP tool denied or failed", { name, error: errorInfo });
           toolOutputs.push({ name, error: errorInfo });
-          allToolCalls.push({ name, arguments: call.function?.arguments || "{}" });
+          allToolCalls.push({ name, arguments: JSON.stringify(args) });
           const denialSummary = errorInfo.reason
             ? `Request denied by policy: ${errorInfo.reason}`
             : errorInfo.message;

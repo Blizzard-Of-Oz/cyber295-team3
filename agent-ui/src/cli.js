@@ -2,6 +2,7 @@
 
 import "dotenv/config";
 import readline from "readline";
+import fs from "fs";
 import { McpClientManager } from "./mcp-client.js";
 import { createAgent } from "./agent.js";
 import { authenticateWithBrowser, authenticateWithDeviceCode, getAuthenticatedUser } from "./cli-auth.js";
@@ -111,7 +112,8 @@ async function runAgent(userInput, authenticatedUserContext = {}) {
       authenticatedUser: authenticatedUserContext.user || "cli-user",
       entraToken: authenticatedUserContext.token,
       demoTimestamp: process.env.DEMO_TIMESTAMP,
-      userInput
+      userInput,
+      availableAttachmentPaths: authenticatedUserContext.availableAttachmentPaths || []
     });
 
     if (JSON_OUTPUT) {
@@ -210,7 +212,7 @@ async function runAgent(userInput, authenticatedUserContext = {}) {
   }
 }
 
-async function startInteractiveMode(useDeviceCode = false) {
+async function startInteractiveMode(useDeviceCode = false, attachmentPaths = []) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -218,10 +220,16 @@ async function startInteractiveMode(useDeviceCode = false) {
 
   // Authenticate once at the start
   const userContext = await getAuthenticatedUserContext(useDeviceCode);
+  userContext.availableAttachmentPaths = attachmentPaths;
 
   console.log("Gmail Agent CLI - Interactive Mode");
   console.log("=====================================");
   console.log(`Authenticated as: ${userContext.user}\n`);
+  if (userContext.availableAttachmentPaths.length > 0) {
+    console.log(`Using attachment paths from ATTACHMENT_PATHS (${userContext.availableAttachmentPaths.length})`);
+    console.log(userContext.availableAttachmentPaths.map((p) => `  - ${p}`).join("\n"));
+    console.log("");
+  }
   console.log("Enter your requests below (type 'exit' to quit)\n");
 
   const askQuestion = () => {
@@ -241,6 +249,43 @@ async function startInteractiveMode(useDeviceCode = false) {
   };
 
   askQuestion();
+}
+
+function resolveAttachmentPathsFromEnv() {
+  const raw = process.env.ATTACHMENT_PATHS || "";
+  if (!raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .filter((v) => fs.existsSync(v));
+}
+
+function resolveAttachmentPathsFromArgs(args) {
+  const attachmentPaths = [];
+  const remaining = [];
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--attach") {
+      const next = args[i + 1];
+      if (next && !next.startsWith("--")) {
+        attachmentPaths.push(next);
+        i += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--attach=")) {
+      const value = arg.slice("--attach=".length);
+      if (value) attachmentPaths.push(value);
+      continue;
+    }
+    remaining.push(arg);
+  }
+
+  const uniquePaths = [...new Set(attachmentPaths.map((v) => v.trim()).filter(Boolean))];
+  const existingPaths = uniquePaths.filter((v) => fs.existsSync(v));
+  return { attachmentPaths: existingPaths, remainingArgs: remaining };
 }
 
 async function main() {
@@ -271,6 +316,7 @@ Usage:
 
 Options:
   --device-code       Use device code flow for authentication (instead of browser)
+  --attach <path>     Provide a local file path to be attached when email send/draft requests include attachments
   --json, -j          Output results in JSON format (machine-readable)
   --help, -h          Show this help message
 
@@ -281,6 +327,7 @@ Authentication:
   Environment Variables:
     AUTHENTICATED_USER    User identifier (bypasses Entra ID login, useful for demos)
     DEMO_TIMESTAMP        ISO timestamp for demo/testing (e.g., 2026-03-11T10:00:00.000Z)
+    ATTACHMENT_PATHS      Comma-separated local file paths available for send_email attachments
     AZURE_CLIENT_ID       Microsoft Entra ID client ID
     AZURE_TENANT_ID       Microsoft Entra ID tenant ID
     AZURE_CLIENT_SECRET   Microsoft Entra ID client secret (optional)
@@ -304,6 +351,10 @@ Examples:
   # Device code flow (for headless environments)
   npm run cli -- --device-code "get my latest email"
 
+  # Attach one or more local files for send_email/draft_email tasks
+  npm run cli -- --attach /tmp/report.pdf "send the incident report to team@example.com"
+  npm run cli -- --attach /tmp/a.txt --attach /tmp/b.csv "draft status email with attachments"
+
   # JSON output for parsing
   npm run cli -- --json "search for important emails" | jq '.summary'
   npm run cli -- --device-code --json "list unread emails" | jq '.toolCalls'
@@ -317,14 +368,25 @@ Examples:
     process.exit(1);
   }
 
+  const parsedAttachmentArgs = resolveAttachmentPathsFromArgs(args);
+  const attachmentPathsFromEnv = resolveAttachmentPathsFromEnv();
+  const availableAttachmentPaths = [
+    ...parsedAttachmentArgs.attachmentPaths,
+    ...attachmentPathsFromEnv
+  ].filter((value, index, array) => array.indexOf(value) === index);
+
+  args.length = 0;
+  args.push(...parsedAttachmentArgs.remainingArgs);
+
   // Check if input is provided as command line argument
   if (args.length > 0) {
     const userInput = args.join(" ");
     const userContext = await getAuthenticatedUserContext(useDeviceCode);
+    userContext.availableAttachmentPaths = availableAttachmentPaths;
     await runAgent(userInput, userContext);
   } else {
     // Start interactive mode
-    await startInteractiveMode(useDeviceCode);
+    await startInteractiveMode(useDeviceCode, availableAttachmentPaths);
   }
 }
 

@@ -9,6 +9,13 @@ Before starting the application components, ensure the following services are in
     Follow the official quickstart guide:
     https://docs.opal.ac/getting-started/quickstart/opal-playground/run-server-and-client
 
+    on MacOS
+    ```
+    /opt/homebrew/opt/colima/bin/colima start
+    docker-compose -f ./docker-compose-cyber295.yml up
+    ```
+    
+
     After cloning the OPAL Docker Compose setup, modify the OPAL server environment variables to point to this policy repository:
 
     ```

@@ -190,6 +190,176 @@ function unique(array) {
   return [...new Set(array)];
 }
 
+function fileExtension(value) {
+  if (typeof value !== "string" || value.trim() === "") return "";
+  const ext = path.extname(value).toLowerCase();
+  return ext.startsWith(".") ? ext.slice(1) : ext;
+}
+
+function normalizeAttachmentPaths(args) {
+  const raw = [];
+
+  if (Array.isArray(args?.attachments)) {
+    raw.push(...args.attachments);
+  }
+
+  if (typeof args?.attachmentPath === "string") {
+    raw.push(args.attachmentPath);
+  }
+
+  if (typeof args?.attachment_path === "string") {
+    raw.push(args.attachment_path);
+  }
+
+  return raw
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean);
+}
+
+function deriveAttachmentMetadata(args) {
+  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
+  const explicitName = args?.attachmentName || args?.attachment_name || null;
+  const paths = normalizeAttachmentPaths(args);
+
+  if (paths.length === 0) {
+    return {
+      attachmentBytes: explicitBytes,
+      attachmentName: explicitName,
+      attachmentCount: 0
+    };
+  }
+
+  let totalBytes = 0;
+  const names = [];
+
+  for (const filePath of paths) {
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        totalBytes += stat.size;
+        names.push(path.basename(filePath));
+      }
+    } catch (_error) {
+      // Ignore inaccessible attachment paths; Gmail tool will return explicit send errors.
+    }
+  }
+
+  const mergedBytes = explicitBytes > 0 ? explicitBytes : totalBytes;
+  const mergedName = explicitName || (names.length > 0 ? names.join(",") : null);
+
+  return {
+    attachmentBytes: mergedBytes,
+    attachmentName: mergedName,
+    attachmentCount: paths.length
+  };
+}
+
+function normalizeProvidedAttachments(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") {
+        const trimmed = entry.trim();
+        if (!trimmed) return null;
+        const name = path.basename(trimmed);
+        const ext = fileExtension(name);
+        return {
+          path: trimmed,
+          name,
+          file_ext: ext,
+          actual_ext: ext,
+          detected_types: ext ? [ext] : []
+        };
+      }
+
+      if (entry && typeof entry === "object") {
+        const normalized = { ...entry };
+        const name = normalized.name || normalized.filename || normalized.file_name;
+        const ext = fileExtension(name || normalized.path || "");
+
+        if (name && !normalized.name) normalized.name = name;
+        if (!normalized.file_ext && ext) normalized.file_ext = ext;
+        if (!normalized.actual_ext && normalized.file_ext) normalized.actual_ext = normalized.file_ext;
+        if (!Array.isArray(normalized.detected_types) && normalized.file_ext) {
+          normalized.detected_types = [normalized.file_ext];
+        }
+
+        return normalized;
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function deriveContextAttachments(req, args) {
+  const provided = normalizeProvidedAttachments(req.body?.context?.attachments);
+  const paths = unique(normalizeAttachmentPaths(args));
+
+  const derived = paths.map((filePath) => {
+    const name = path.basename(filePath);
+    const ext = fileExtension(name);
+    let sizeBytes = null;
+
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        sizeBytes = stat.size;
+      }
+    } catch (_error) {
+      // Keep attachment metadata even when file is inaccessible.
+    }
+
+    return {
+      path: filePath,
+      name,
+      size_bytes: sizeBytes,
+      file_ext: ext,
+      actual_ext: ext,
+      detected_types: ext ? [ext] : []
+    };
+  });
+
+  const explicitName = args?.attachmentName || args?.attachment_name;
+  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
+  if (derived.length === 0 && typeof explicitName === "string" && explicitName.trim()) {
+    const normalizedName = explicitName.trim();
+    const ext = fileExtension(normalizedName);
+    derived.push({
+      name: normalizedName,
+      size_bytes: explicitBytes > 0 ? explicitBytes : null,
+      file_ext: ext,
+      actual_ext: ext,
+      detected_types: ext ? [ext] : []
+    });
+  }
+
+  const merged = [...provided, ...derived];
+  const deduped = [];
+  const seen = new Set();
+
+  for (const attachment of merged) {
+    const key = `${attachment.path || ""}|${attachment.name || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(attachment);
+  }
+
+  return deduped;
+}
+
+function normalizeToolArguments(name, args) {
+  const normalized = args && typeof args === "object" ? { ...args } : {};
+  if (name === "send_email" || name === "draft_email") {
+    const attachments = normalizeAttachmentPaths(normalized);
+    if (attachments.length > 0) {
+      normalized.attachments = unique(attachments);
+    }
+  }
+  return normalized;
+}
+
 // NOTE: Urgency score calculation is now handled by OPA policy, not by this application.
 // OPA uses urgency_keywords from data.json and checks both content_text and user_input.
 
@@ -229,6 +399,9 @@ function buildOpaInput(req, toolName, args) {
   const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
   const userInput = req.body?.context?.userInput || null;
 
+  const attachmentMeta = deriveAttachmentMetadata(args);
+  const contextAttachments = deriveContextAttachments(req, args);
+
   const opaInput = {
     tool: {
       name: toolName,
@@ -250,8 +423,10 @@ function buildOpaInput(req, toolName, args) {
       recipients,
       content_text: contentText,
       user_input: userInput,
-      attachment_bytes: Number(args?.attachmentBytes || args?.attachment_bytes || 0),
-      attachment_name: args?.attachmentName || args?.attachment_name || null,
+      attachment_bytes: Number(attachmentMeta.attachmentBytes || 0),
+      attachment_name: attachmentMeta.attachmentName,
+      attachment_count: attachmentMeta.attachmentCount,
+      attachments: contextAttachments,
       data_classification: args?.dataClassification || args?.data_classification || "none",
       record_count: Number(args?.recordCount || args?.record_count || 0)
     }
@@ -523,6 +698,7 @@ app.post("/call-tool", async (req, res) => {
   let auditErrorMessage = null;
   try {
     const { name, arguments: args } = req.body || {};
+    const normalizedArgs = normalizeToolArguments(name, args);
     const authenticatedUser = getAuthenticatedUser(req);
     if (accountLockManager && accountLockManager.isLocked(authenticatedUser)) {
       return res.status(403).json({ error: "Request denied by policy", reason: "account locked" });
@@ -530,11 +706,11 @@ app.post("/call-tool", async (req, res) => {
     const hasEntraToken = Boolean(req.headers["x-entra-token"]);
     debugLog("Call tool request received", {
       name,
-      hasArgs: Boolean(args),
+      hasArgs: Boolean(normalizedArgs),
       authenticatedUser,
       hasEntraToken
     });
-    if (!name || !args) {
+    if (!name || !normalizedArgs) {
       return res.status(400).json({ error: "name and arguments are required" });
     }
 
@@ -589,11 +765,11 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const opaDecision = await callOpaDecision(req, name, args);
+    const opaDecision = await callOpaDecision(req, name, normalizedArgs);
     const requesterIp = getRequesterIp(req);
-    const targetUserId = deriveTarget(args);
+    const targetUserId = deriveTarget(normalizedArgs);
 
-    const opaRequest = buildOpaInput(req, name, args);
+    const opaRequest = buildOpaInput(req, name, normalizedArgs);
     const requestId = req.body?.request_id || (demoRequestIdGenerator ? demoRequestIdGenerator.nextId() : `Request-${crypto.randomBytes(6).toString("hex")}`);
     immudbLogger
       .recordPolicyDecision({
@@ -672,7 +848,7 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const result = await mcpClientManager.callTool(name, args);
+    const result = await mcpClientManager.callTool(name, normalizedArgs);
     debugLog("Tool call completed", { name });
 
     const toolError = extractToolError(result);
@@ -721,9 +897,10 @@ app.post("/call-tool", async (req, res) => {
     debugLog("Tool call failed", { error: error?.message || error });
     try {
       const { name, arguments: args } = req.body || {};
+      const normalizedArgs = normalizeToolArguments(name, args);
       const authenticatedUser = getAuthenticatedUser(req);
       const requesterIp = getRequesterIp(req);
-      const targetUserId = deriveTarget(args);
+      const targetUserId = deriveTarget(normalizedArgs);
       immudbLogger
         .recordAction({
           authenticatedUser,

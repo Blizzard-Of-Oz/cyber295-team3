@@ -577,13 +577,33 @@ chunked_exfil if {
 # ---------------------------------------------------------
 # UC30 — Compressed archive exfiltration (gateway flags)
 # ---------------------------------------------------------
+archive_extension_set := exts if {
+  configured := object.get(cfg, "archive_extensions", ["zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz"])
+  exts := {normalized |
+    some ext in configured
+    ext_lower := lower(ext)
+    normalized := trim_prefix(ext_lower, ".")
+    normalized != ""
+  }
+}
+
+attachment_is_archive(a) if {
+  declared := lower(trim_prefix(object.get(a, "file_ext", ""), "."))
+  declared != ""
+  declared in archive_extension_set
+} else if {
+  actual := lower(trim_prefix(object.get(a, "actual_ext", ""), "."))
+  actual != ""
+  actual in archive_extension_set
+}
+
 archive_exfil if {
   some a in attachments
-  object.get(a, "is_archive", false)
+  attachment_is_archive(a)
   object.get(a, "archive_contains_prohibited", false)
 } else if {
   some a in attachments
-  object.get(a, "is_archive", false)
+  attachment_is_archive(a)
   object.get(a, "archive_password_protected", false)
   any_external_domain
 }
