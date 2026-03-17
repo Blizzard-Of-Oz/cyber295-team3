@@ -190,6 +190,12 @@ function unique(array) {
   return [...new Set(array)];
 }
 
+function fileExtension(value) {
+  if (typeof value !== "string" || value.trim() === "") return "";
+  const ext = path.extname(value).toLowerCase();
+  return ext.startsWith(".") ? ext.slice(1) : ext;
+}
+
 function normalizeAttachmentPaths(args) {
   const raw = [];
 
@@ -248,6 +254,101 @@ function deriveAttachmentMetadata(args) {
   };
 }
 
+function normalizeProvidedAttachments(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") {
+        const trimmed = entry.trim();
+        if (!trimmed) return null;
+        const name = path.basename(trimmed);
+        const ext = fileExtension(name);
+        return {
+          path: trimmed,
+          name,
+          file_ext: ext,
+          actual_ext: ext,
+          detected_types: ext ? [ext] : []
+        };
+      }
+
+      if (entry && typeof entry === "object") {
+        const normalized = { ...entry };
+        const name = normalized.name || normalized.filename || normalized.file_name;
+        const ext = fileExtension(name || normalized.path || "");
+
+        if (name && !normalized.name) normalized.name = name;
+        if (!normalized.file_ext && ext) normalized.file_ext = ext;
+        if (!normalized.actual_ext && normalized.file_ext) normalized.actual_ext = normalized.file_ext;
+        if (!Array.isArray(normalized.detected_types) && normalized.file_ext) {
+          normalized.detected_types = [normalized.file_ext];
+        }
+
+        return normalized;
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function deriveContextAttachments(req, args) {
+  const provided = normalizeProvidedAttachments(req.body?.context?.attachments);
+  const paths = unique(normalizeAttachmentPaths(args));
+
+  const derived = paths.map((filePath) => {
+    const name = path.basename(filePath);
+    const ext = fileExtension(name);
+    let sizeBytes = null;
+
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        sizeBytes = stat.size;
+      }
+    } catch (_error) {
+      // Keep attachment metadata even when file is inaccessible.
+    }
+
+    return {
+      path: filePath,
+      name,
+      size_bytes: sizeBytes,
+      file_ext: ext,
+      actual_ext: ext,
+      detected_types: ext ? [ext] : []
+    };
+  });
+
+  const explicitName = args?.attachmentName || args?.attachment_name;
+  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
+  if (derived.length === 0 && typeof explicitName === "string" && explicitName.trim()) {
+    const normalizedName = explicitName.trim();
+    const ext = fileExtension(normalizedName);
+    derived.push({
+      name: normalizedName,
+      size_bytes: explicitBytes > 0 ? explicitBytes : null,
+      file_ext: ext,
+      actual_ext: ext,
+      detected_types: ext ? [ext] : []
+    });
+  }
+
+  const merged = [...provided, ...derived];
+  const deduped = [];
+  const seen = new Set();
+
+  for (const attachment of merged) {
+    const key = `${attachment.path || ""}|${attachment.name || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(attachment);
+  }
+
+  return deduped;
+}
+
 function normalizeToolArguments(name, args) {
   const normalized = args && typeof args === "object" ? { ...args } : {};
   if (name === "send_email" || name === "draft_email") {
@@ -299,6 +400,7 @@ function buildOpaInput(req, toolName, args) {
   const userInput = req.body?.context?.userInput || null;
 
   const attachmentMeta = deriveAttachmentMetadata(args);
+  const contextAttachments = deriveContextAttachments(req, args);
 
   const opaInput = {
     tool: {
@@ -324,6 +426,7 @@ function buildOpaInput(req, toolName, args) {
       attachment_bytes: Number(attachmentMeta.attachmentBytes || 0),
       attachment_name: attachmentMeta.attachmentName,
       attachment_count: attachmentMeta.attachmentCount,
+      attachments: contextAttachments,
       data_classification: args?.dataClassification || args?.data_classification || "none",
       record_count: Number(args?.recordCount || args?.record_count || 0)
     }

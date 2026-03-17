@@ -70,6 +70,46 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     }
   }
 
+  function uniqueAttachmentPaths(values) {
+    if (!Array.isArray(values)) return [];
+    return [...new Set(values.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim()))];
+  }
+
+  function resolveAttachmentPathAliases(attachments, availableAttachmentPaths, availableAttachmentMetadata) {
+    const available = uniqueAttachmentPaths(availableAttachmentPaths);
+    const byAlias = new Map();
+
+    for (const fullPath of available) {
+      byAlias.set(fullPath.toLowerCase(), fullPath);
+      const baseName = fullPath.split(/[\\/]/).pop();
+      if (baseName) byAlias.set(baseName.toLowerCase(), fullPath);
+    }
+
+    for (const meta of availableAttachmentMetadata || []) {
+      const fullPath = typeof meta?.path === "string" ? meta.path.trim() : "";
+      if (!fullPath) continue;
+      const displayName = typeof meta?.displayName === "string" ? meta.displayName.trim() : "";
+      if (displayName) byAlias.set(displayName.toLowerCase(), fullPath);
+    }
+
+    const requested = Array.isArray(attachments)
+      ? attachments
+      : typeof attachments === "string"
+        ? [attachments]
+        : [];
+
+    const resolved = [];
+    for (const item of requested) {
+      if (typeof item !== "string") continue;
+      const key = item.trim().toLowerCase();
+      if (!key) continue;
+      const resolvedPath = byAlias.get(key);
+      if (resolvedPath) resolved.push(resolvedPath);
+    }
+
+    return uniqueAttachmentPaths(resolved);
+  }
+
   async function run(requirement, context = {}) {
     if (!openai.apiKey) {
       throw new Error("OPENAI_API_KEY is not set");
@@ -232,15 +272,26 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
           ? JSON.parse(call.function.arguments)
           : {};
 
-        // If user requested attachments and uploads were provided, backfill attachments when omitted.
+        // Expand attachment paths to include all uploaded files for send/draft actions.
         if (
           (name === "send_email" || name === "draft_email") &&
           availableAttachmentPaths.length > 0 &&
-          (!Array.isArray(args.attachments) || args.attachments.length === 0) &&
-          userAskedForAttachment(requirement)
+          (
+            userAskedForAttachment(requirement) ||
+            (Array.isArray(args.attachments) && args.attachments.length > 0) ||
+            typeof args.attachments === "string"
+          )
         ) {
-          args.attachments = [...availableAttachmentPaths];
-          debugLog("Auto-filled attachments for email action", {
+          const resolvedRequested = resolveAttachmentPathAliases(
+            args.attachments,
+            availableAttachmentPaths,
+            availableAttachmentMetadata
+          );
+          args.attachments = uniqueAttachmentPaths([
+            ...resolvedRequested,
+            ...availableAttachmentPaths
+          ]);
+          debugLog("Expanded attachments for email action", {
             name,
             attachmentCount: args.attachments.length
           });
