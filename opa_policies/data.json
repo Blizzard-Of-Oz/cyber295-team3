@@ -28,7 +28,7 @@
     "business_hours": {
       "start_hour": 9,
       "end_hour": 18,
-      "timezone": "UTC-6"
+      "timezone": "UTC-5"
     },
     "urgency_keywords": {
       "urgent": 2.3,
@@ -62,7 +62,8 @@
         ".sql", 
         ".db", 
         ".mdb", 
-        ".csv"
+        ".csv",
+        ".exe"
       ],
       "min_blocked_type_matches": 1,
       "max_file_count": 1000,
@@ -95,6 +96,6 @@
     "trusted_senders": [
       "team3@billyyaoischoolberkeley.onmicrosoft.com"
     ],
-    "policy_version": "v2-demo-story"
+    "policy_version": "v3"
   }
 }

@@ -679,6 +679,34 @@ archive_exfil if {
   archive_contains_prohibited_for_attachment(a)
 }
 
+# Block direct attachments when extension matches archive_policy.blocked_file_types.
+direct_blocked_attachment if {
+  some a in attachments
+  not attachment_is_archive(a)
+  declared := lower(trim_prefix(object.get(a, "file_ext", ""), "."))
+  declared != ""
+  declared in archive_blocked_file_types
+}
+
+direct_blocked_attachment if {
+  some a in attachments
+  not attachment_is_archive(a)
+  actual := lower(trim_prefix(object.get(a, "actual_ext", ""), "."))
+  actual != ""
+  actual in archive_blocked_file_types
+}
+
+direct_blocked_attachment if {
+  some a in attachments
+  not attachment_is_archive(a)
+  name := lower(object.get(a, "name", ""))
+  contains(name, ".")
+  parts := split(name, ".")
+  ext := parts[count(parts)-1]
+  ext != ""
+  ext in archive_blocked_file_types
+}
+
 # ---------------------------------------------------------
 # UC31 — Email-to-cloud storage forwarding (gateway flag)
 # ---------------------------------------------------------
@@ -795,6 +823,7 @@ triggered_controls[c] if { stego_detected; c := "steganography_detected" }      
 triggered_controls[c] if { dns_tunneling_url; c := "dns_tunneling_url_detected" }          # UC28
 triggered_controls[c] if { chunked_exfil; c := "chunked_exfil_detected" }                  # UC29
 triggered_controls[c] if { archive_exfil; c := "archive_exfil_detected" }                  # UC30
+triggered_controls[c] if { direct_blocked_attachment; c := "blocked_direct_attachment_detected" } # UC9
 triggered_controls[c] if { cloud_forwarding_detected; c := "cloud_forwarding_detected" }   # UC31
 triggered_controls[c] if { multi_stage_payload; c := "multi_stage_payload_detected" }      # UC32
 triggered_controls[c] if { lolbin_detected; c := "lolbin_detected" }                       # UC33
@@ -849,6 +878,7 @@ deny_reasons[r] if { stego_detected; r := "Steganography signal indicates hidden
 deny_reasons[r] if { dns_tunneling_url; r := "URL appears to contain encoded data (DNS tunneling / high-entropy subdomain)." } # UC28
 deny_reasons[r] if { chunked_exfil; r := "Low-and-slow exfiltration detected by recipient frequency/volume." } # UC29
 deny_reasons[r] if { archive_exfil; r := "Archive exfiltration blocked (prohibited contents or encrypted archive to external)." } # UC30
+deny_reasons[r] if { direct_blocked_attachment; r := "Attachment blocked: file extension is prohibited by archive_policy.blocked_file_types." } # UC9
 deny_reasons[r] if { cloud_forwarding_detected; r := "Cloud forwarding / email-to-storage exfil pattern detected." } # UC31
 deny_reasons[r] if { multi_stage_payload; r := "Multi-stage payload delivery suspected (excessive redirects or executable delivery)." } # UC32
 deny_reasons[r] if { lolbin_detected; r := "LOLBin / living-off-the-land command pattern detected." } # UC33

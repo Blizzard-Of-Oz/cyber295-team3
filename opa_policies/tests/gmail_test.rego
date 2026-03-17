@@ -822,7 +822,7 @@ test_policy_version_in_decision if {
   }
 
   result := data.gmail.decision with input as test_input
-  result.policy_version == "v2-demo-story"
+  result.policy_version == "v3"
 }
 
 # ========== EDGE CASES ==========
@@ -1204,6 +1204,34 @@ test_deny_uc21_attachment_spoofing if {
   result := data.gmail.decision with input as test_input
   result.decision == "DENY"
   "attachment_extension_mismatch" in result.triggered_controls
+}
+
+# ========== UC9 — DIRECT BLOCKED ATTACHMENT EXTENSION ==========
+test_deny_uc9_direct_blocked_attachment_extension if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Please review attached export",
+      "user_input": "Send attachment",
+      "attachment_bytes": 4096,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "name": "customer_export.sql",
+          "file_ext": ".sql",
+          "actual_ext": ".sql",
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "blocked_direct_attachment_detected" in result.triggered_controls
+  result.reason == "Attachment blocked: file extension is prohibited by archive_policy.blocked_file_types."
 }
 
 # ========== UC22 — SEND-AS / DELEGATION APPROVAL ==========
