@@ -1,5 +1,8 @@
 import { OpenAI } from "openai";
 import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+import os from "os";
 
 export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = null }) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -105,6 +108,51 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     return uniqueAttachmentPaths(resolved);
   }
 
+  function sanitizeGeneratedAttachmentName(name) {
+    if (typeof name !== "string") return "generated.txt";
+    const normalized = path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_");
+    return normalized || "generated.txt";
+  }
+
+  async function createGeneratedAttachmentFile(args, context, availableAttachmentPaths, availableAttachmentMetadata) {
+    const content = typeof args?.content === "string" ? args.content : "";
+    const requestedName = typeof args?.filename === "string" ? args.filename : "generated.txt";
+    const baseName = sanitizeGeneratedAttachmentName(requestedName);
+    const rootDir =
+      typeof context?.generatedAttachmentDir === "string" && context.generatedAttachmentDir.trim().length > 0
+        ? context.generatedAttachmentDir
+        : path.join(os.tmpdir(), "agent-ui-generated");
+
+    await fs.mkdir(rootDir, { recursive: true });
+
+    const extension = path.extname(baseName);
+    const stem = extension ? baseName.slice(0, -extension.length) : baseName;
+    let candidate = baseName;
+    let counter = 1;
+    while (availableAttachmentPaths.includes(path.join(rootDir, candidate))) {
+      candidate = `${stem}-${counter}${extension}`;
+      counter += 1;
+    }
+
+    const filePath = path.join(rootDir, candidate);
+    await fs.writeFile(filePath, content, "utf8");
+
+    const byteSize = Buffer.byteLength(content, "utf8");
+    availableAttachmentPaths.push(filePath);
+    availableAttachmentMetadata.push({
+      path: filePath,
+      displayName: candidate,
+      displaySizeBytes: byteSize
+    });
+
+    return {
+      path: filePath,
+      filename: candidate,
+      sizeBytes: byteSize,
+      message: `Generated attachment created at ${filePath}`
+    };
+  }
+
   async function run(requirement, context = {}) {
     if (!openai.apiKey) {
       throw new Error("OPENAI_API_KEY is not set");
@@ -165,6 +213,30 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
         parameters: tool.inputSchema || { type: "object", properties: {} }
       }
     }));
+    tools.push({
+      type: "function",
+      function: {
+        name: "create_text_attachment",
+        description:
+          "Create a UTF-8 text file attachment from generated content and return the local file path. " +
+          "Use this before send_email/draft_email when the user asks for AI-generated content as an attachment.",
+        parameters: {
+          type: "object",
+          properties: {
+            filename: {
+              type: "string",
+              description: "Desired filename, for example summary.txt or ticket-report.md"
+            },
+            content: {
+              type: "string",
+              description: "Text content to write into the attachment file"
+            }
+          },
+          required: ["filename", "content"],
+          additionalProperties: false
+        }
+      }
+    });
 
     const systemPrompt = [
       "You are an AI agent specialized in handling Gmail operations and IT ticket management.",
@@ -179,6 +251,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
       "2. If the user explicitly says 'search emails', 'check inbox', 'find in Gmail', or 'email search': Use email tools.",
       "3. Be precise with recipients, subjects, and email contents when sending emails.",
       "3a. For send_email and draft_email, always use the `attachments` field as an array of local file paths when attachments are requested.",
+      "3b. If the user asks for generated content to be attached as a file, first call `create_text_attachment`, then include its returned path in `attachments` for send_email or draft_email.",
       "4. If the user asks something not covered in the knowledge base and clarifies it's about emails, then search emails.",
       "5. If data is missing and ambiguous, ask for clarification rather than guessing."
     ].join(" ");
@@ -266,6 +339,44 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
         const args = call.function?.arguments
           ? JSON.parse(call.function.arguments)
           : {};
+
+        if (name === "create_text_attachment") {
+          debugLog("Creating generated text attachment", {
+            filename: args?.filename,
+            contentLength: typeof args?.content === "string" ? args.content.length : 0
+          });
+          try {
+            const result = await createGeneratedAttachmentFile(
+              args,
+              context,
+              availableAttachmentPaths,
+              availableAttachmentMetadata
+            );
+            toolOutputs.push({ name, result });
+            allToolCalls.push({ name, arguments: JSON.stringify(args) });
+            messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: JSON.stringify(result)
+            });
+          } catch (error) {
+            const errorInfo = {
+              message: error?.message || "Failed to create generated attachment",
+              reason: null,
+              status: null,
+              details: null
+            };
+            debugLog("Generated attachment creation failed", { error: errorInfo });
+            toolOutputs.push({ name, error: errorInfo });
+            allToolCalls.push({ name, arguments: JSON.stringify(args) });
+            messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: JSON.stringify({ error: errorInfo.message })
+            });
+          }
+          continue;
+        }
 
         // Always propagate uploaded WebUI attachments for send/draft tools so they are not dropped.
         if (

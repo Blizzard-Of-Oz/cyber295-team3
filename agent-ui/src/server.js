@@ -147,13 +147,15 @@ function createUniqueFilename(baseName, usedNames, fallbackIndex) {
 
 async function materializeRequestAttachments(req) {
   const payload = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
-  if (payload.length === 0) {
-    return { paths: [], metadata: [], cleanup: async () => {} };
-  }
-
   const tempRoot = process.env.AGENT_UPLOAD_TEMP_DIR || path.join(os.tmpdir(), "agent-ui-attachments");
   const requestDir = path.join(tempRoot, crypto.randomBytes(12).toString("hex"));
   await fs.mkdir(requestDir, { recursive: true });
+
+  if (payload.length === 0) {
+    return { paths: [], metadata: [], requestDir, cleanup: async () => {
+      await fs.rm(requestDir, { recursive: true, force: true });
+    } };
+  }
 
   const paths = [];
   const metadata = [];
@@ -182,6 +184,7 @@ async function materializeRequestAttachments(req) {
   return {
     paths,
     metadata,
+    requestDir,
     cleanup: async () => {
       await fs.rm(requestDir, { recursive: true, force: true });
     }
@@ -320,7 +323,8 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
       entraToken,
       requesterIp,
       availableAttachmentPaths,
-      availableAttachmentMetadata
+      availableAttachmentMetadata,
+      generatedAttachmentDir: uploaded.requestDir
     });
     debugLog("Agent run completed", {
       toolCalls: result?.toolCalls?.length || 0,
