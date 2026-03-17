@@ -577,6 +577,25 @@ chunked_exfil if {
 # ---------------------------------------------------------
 # UC30 — Compressed archive exfiltration (gateway flags)
 # ---------------------------------------------------------
+archive_policy := object.get(cfg, "archive_policy", {})
+
+archive_blocked_file_types := exts if {
+  configured := object.get(archive_policy, "blocked_file_types", ["exe", "dll", "js", "vbs", "ps1", "bat", "cmd", "scr", "jar"])
+  exts := {normalized |
+    some ext in configured
+    type_name(ext) == "string"
+    ext_lower := lower(ext)
+    normalized := trim_prefix(ext_lower, ".")
+    normalized != ""
+  }
+}
+
+archive_min_blocked_type_matches := object.get(archive_policy, "min_blocked_type_matches", 1)
+archive_max_file_count := object.get(archive_policy, "max_file_count", 1000)
+archive_max_compression_ratio := object.get(archive_policy, "max_compression_ratio", 15.0)
+archive_block_password_protected := object.get(archive_policy, "block_password_protected", true)
+archive_password_protected_requires_external := object.get(archive_policy, "password_protected_requires_external", true)
+
 archive_extension_set := exts if {
   configured := object.get(cfg, "archive_extensions", ["zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz"])
   exts := {normalized |
@@ -597,15 +616,95 @@ attachment_is_archive(a) if {
   actual in archive_extension_set
 }
 
+archive_contains_file_types_for_attachment(a) := types if {
+  archive_obj := object.get(a, "archive", {})
+  raw_types := object.get(archive_obj, "contains_file_types", [])
+  types := [normalized |
+    some t in raw_types
+    type_name(t) == "string"
+    t_lower := lower(t)
+    normalized := trim_prefix(t_lower, ".")
+    normalized != ""
+  ]
+}
+
+archive_file_count_for_attachment(a) := object.get(object.get(a, "archive", {}), "file_count", 0)
+
+archive_password_protected_for_attachment(a) if {
+  object.get(object.get(a, "archive", {}), "password_protected", false)
+} else if {
+  # Backward compatibility with legacy flat metadata field
+  object.get(a, "archive_password_protected", false)
+}
+
+archive_compression_ratio_for_attachment(a) := object.get(object.get(a, "archive", {}), "compression_ratio", 0)
+
+archive_contains_prohibited_for_attachment(a) if {
+  types := archive_contains_file_types_for_attachment(a)
+  blocked := {t |
+    some t in types
+    t in archive_blocked_file_types
+  }
+  count(blocked) >= archive_min_blocked_type_matches
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  file_count := archive_file_count_for_attachment(a)
+  type_name(file_count) == "number"
+  file_count > archive_max_file_count
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  archive_block_password_protected
+  archive_password_protected_for_attachment(a)
+  not archive_password_protected_requires_external
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  archive_block_password_protected
+  archive_password_protected_for_attachment(a)
+  archive_password_protected_requires_external
+  any_external_domain
+}
+
+archive_contains_prohibited_for_attachment(a) if {
+  ratio := archive_compression_ratio_for_attachment(a)
+  type_name(ratio) == "number"
+  ratio >= archive_max_compression_ratio
+}
+
 archive_exfil if {
   some a in attachments
   attachment_is_archive(a)
-  object.get(a, "archive_contains_prohibited", false)
-} else if {
+  archive_contains_prohibited_for_attachment(a)
+}
+
+# Block direct attachments when extension matches archive_policy.blocked_file_types.
+direct_blocked_attachment if {
   some a in attachments
-  attachment_is_archive(a)
-  object.get(a, "archive_password_protected", false)
-  any_external_domain
+  not attachment_is_archive(a)
+  declared := lower(trim_prefix(object.get(a, "file_ext", ""), "."))
+  declared != ""
+  declared in archive_blocked_file_types
+}
+
+direct_blocked_attachment if {
+  some a in attachments
+  not attachment_is_archive(a)
+  actual := lower(trim_prefix(object.get(a, "actual_ext", ""), "."))
+  actual != ""
+  actual in archive_blocked_file_types
+}
+
+direct_blocked_attachment if {
+  some a in attachments
+  not attachment_is_archive(a)
+  name := lower(object.get(a, "name", ""))
+  contains(name, ".")
+  parts := split(name, ".")
+  ext := parts[count(parts)-1]
+  ext != ""
+  ext in archive_blocked_file_types
 }
 
 # ---------------------------------------------------------
@@ -724,6 +823,7 @@ triggered_controls[c] if { stego_detected; c := "steganography_detected" }      
 triggered_controls[c] if { dns_tunneling_url; c := "dns_tunneling_url_detected" }          # UC28
 triggered_controls[c] if { chunked_exfil; c := "chunked_exfil_detected" }                  # UC29
 triggered_controls[c] if { archive_exfil; c := "archive_exfil_detected" }                  # UC30
+triggered_controls[c] if { direct_blocked_attachment; c := "blocked_direct_attachment_detected" } # UC9
 triggered_controls[c] if { cloud_forwarding_detected; c := "cloud_forwarding_detected" }   # UC31
 triggered_controls[c] if { multi_stage_payload; c := "multi_stage_payload_detected" }      # UC32
 triggered_controls[c] if { lolbin_detected; c := "lolbin_detected" }                       # UC33
@@ -778,6 +878,7 @@ deny_reasons[r] if { stego_detected; r := "Steganography signal indicates hidden
 deny_reasons[r] if { dns_tunneling_url; r := "URL appears to contain encoded data (DNS tunneling / high-entropy subdomain)." } # UC28
 deny_reasons[r] if { chunked_exfil; r := "Low-and-slow exfiltration detected by recipient frequency/volume." } # UC29
 deny_reasons[r] if { archive_exfil; r := "Archive exfiltration blocked (prohibited contents or encrypted archive to external)." } # UC30
+deny_reasons[r] if { direct_blocked_attachment; r := "Attachment blocked: file extension is prohibited by archive_policy.blocked_file_types." } # UC9
 deny_reasons[r] if { cloud_forwarding_detected; r := "Cloud forwarding / email-to-storage exfil pattern detected." } # UC31
 deny_reasons[r] if { multi_stage_payload; r := "Multi-stage payload delivery suspected (excessive redirects or executable delivery)." } # UC32
 deny_reasons[r] if { lolbin_detected; r := "LOLBin / living-off-the-land command pattern detected." } # UC33

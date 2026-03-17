@@ -768,6 +768,7 @@ test_lock_account_and_alert_departing_employee if {
 test_lock_account_bulk_exfil if {
   test_input := {
     "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "timestamp": 43200000000000,
     "context": {
       "recipient_count": 1,
       "recipients": ["personal@outlook.com"],
@@ -821,7 +822,7 @@ test_policy_version_in_decision if {
   }
 
   result := data.gmail.decision with input as test_input
-  result.policy_version == "v2-demo-story"
+  result.policy_version == "v3"
 }
 
 # ========== EDGE CASES ==========
@@ -1205,6 +1206,34 @@ test_deny_uc21_attachment_spoofing if {
   "attachment_extension_mismatch" in result.triggered_controls
 }
 
+# ========== UC9 — DIRECT BLOCKED ATTACHMENT EXTENSION ==========
+test_deny_uc9_direct_blocked_attachment_extension if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Please review attached export",
+      "user_input": "Send attachment",
+      "attachment_bytes": 4096,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "name": "customer_export.sql",
+          "file_ext": ".sql",
+          "actual_ext": ".sql",
+        },
+      ],
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "blocked_direct_attachment_detected" in result.triggered_controls
+  result.reason == "Attachment blocked: file extension is prohibited by archive_policy.blocked_file_types."
+}
+
 # ========== UC22 — SEND-AS / DELEGATION APPROVAL ==========
 test_require_approval_uc22_protected_send_as if {
   test_input := {
@@ -1435,8 +1464,14 @@ test_deny_uc30_archive_prohibited_contents if {
       "record_count": 0,
       "attachments": [
         {
-          "is_archive": true,
-          "archive_contains_prohibited": true,
+          "file_ext": "zip",
+          "actual_ext": "zip",
+          "archive": {
+            "contains_file_types": ["sql", "txt"],
+            "file_count": 2,
+            "password_protected": false,
+            "compression_ratio": 2.0,
+          },
         },
       ],
     }
@@ -1460,8 +1495,14 @@ test_deny_uc30_encrypted_archive_external if {
       "record_count": 0,
       "attachments": [
         {
-          "is_archive": true,
-          "archive_password_protected": true,
+          "file_ext": "zip",
+          "actual_ext": "zip",
+          "archive": {
+            "contains_file_types": ["pdf"],
+            "file_count": 3,
+            "password_protected": true,
+            "compression_ratio": 1.5,
+          },
         },
       ],
     }

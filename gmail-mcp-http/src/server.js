@@ -4,6 +4,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 import fs from "fs";
+import * as tar from "tar";
+import yauzl from "yauzl";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
@@ -21,6 +23,14 @@ const OPA_DECISION_URL =
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
 const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
+const SENSITIVE_HEADER_NAMES = [
+  "authorization",
+  "x-entra-token",
+  "cookie",
+  "set-cookie",
+  "proxy-authorization",
+  "x-api-key"
+];
 
 // Demo utilities (loaded only if demo routes are enabled)
 let demoRequestIdGenerator = null;
@@ -139,25 +149,36 @@ function getAuthenticatedUser(req) {
   return "unknown";
 }
 
-function collectOpaHeaders(req) {
-  const allowedHeaders = new Set([
-    "authorization",
-    "user-agent",
-    "x-entra-token",
-    "x-authenticated-user",
-    "x-user-identity",
-    "x-user-ip",
-    "x-forwarded-for",
-    "x-real-ip"
-  ]);
+function collectRequestHeaders(req) {
   const headers = {};
   for (const [key, value] of Object.entries(req.headers || {})) {
     const normalizedKey = String(key).toLowerCase();
-    if (allowedHeaders.has(normalizedKey) || normalizedKey.startsWith("x-")) {
-      headers[normalizedKey] = value;
-    }
+    headers[normalizedKey] = value;
   }
   return headers;
+}
+
+function buildHttpRequestSnapshot(req) {
+  return {
+    method: req.method,
+    path: req.path,
+    original_url: req.originalUrl,
+    protocol: req.protocol,
+    http_version: req.httpVersion,
+    host: req.get?.("host") || req.headers?.host || null,
+    headers: collectRequestHeaders(req),
+    query: req.query || {},
+    params: req.params || {},
+    body: req.body || null
+  };
+}
+
+function redactHeaders(headers = {}) {
+  const redacted = { ...headers };
+  for (const headerName of SENSITIVE_HEADER_NAMES) {
+    if (redacted[headerName]) redacted[headerName] = "[redacted]";
+  }
+  return redacted;
 }
 
 function getCorrelationId(req) {
@@ -194,6 +215,177 @@ function fileExtension(value) {
   if (typeof value !== "string" || value.trim() === "") return "";
   const ext = path.extname(value).toLowerCase();
   return ext.startsWith(".") ? ext.slice(1) : ext;
+}
+
+function isArchiveExtension(ext = "") {
+  return ["zip", "7z", "rar", "tar", "tgz", "gz", "bz2", "xz"].includes(lower(ext));
+}
+
+function lower(value) {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+function toFixedNumber(value, digits = 4) {
+  if (!Number.isFinite(value)) return null;
+  return Number(value.toFixed(digits));
+}
+
+function buildArchiveMetadata({ containsFileTypes = [], fileCount = 0, passwordProtected = false, compressionRatio = null } = {}) {
+  return {
+    contains_file_types: unique(containsFileTypes.map((ext) => lower(ext)).filter(Boolean)).sort(),
+    file_count: Number.isFinite(fileCount) ? fileCount : 0,
+    password_protected: Boolean(passwordProtected),
+    compression_ratio: compressionRatio
+  };
+}
+
+async function inspectZipArchive(filePath) {
+  return new Promise((resolve) => {
+    yauzl.open(filePath, { lazyEntries: true, autoClose: true }, (openError, zipFile) => {
+      if (openError || !zipFile) {
+        resolve(null);
+        return;
+      }
+
+      let fileCount = 0;
+      let totalCompressedBytes = 0;
+      let totalUncompressedBytes = 0;
+      let passwordProtected = false;
+      const containsFileTypes = [];
+
+      zipFile.on("entry", (entry) => {
+        if (!entry || /\/$/.test(entry.fileName || "")) {
+          zipFile.readEntry();
+          return;
+        }
+
+        fileCount += 1;
+        totalCompressedBytes += Number(entry.compressedSize || 0);
+        totalUncompressedBytes += Number(entry.uncompressedSize || 0);
+
+        const entryExt = fileExtension(path.basename(entry.fileName || ""));
+        if (entryExt) {
+          containsFileTypes.push(entryExt);
+        }
+
+        if ((entry.generalPurposeBitFlag & 0x1) === 0x1) {
+          passwordProtected = true;
+        }
+
+        zipFile.readEntry();
+      });
+
+      zipFile.on("end", () => {
+        const compressionRatio =
+          totalCompressedBytes > 0 ? toFixedNumber(totalUncompressedBytes / totalCompressedBytes) : null;
+        resolve(
+          buildArchiveMetadata({
+            containsFileTypes,
+            fileCount,
+            passwordProtected,
+            compressionRatio
+          })
+        );
+      });
+
+      zipFile.on("error", () => resolve(null));
+      zipFile.readEntry();
+    });
+  });
+}
+
+function isTarLikeArchive(filePath, ext) {
+  const normalizedPath = lower(filePath);
+  if (ext === "tar" || ext === "tgz") return true;
+  if (normalizedPath.endsWith(".tar.gz") || normalizedPath.endsWith(".tar.bz2") || normalizedPath.endsWith(".tar.xz")) {
+    return true;
+  }
+  return false;
+}
+
+async function inspectTarArchive(filePath, archiveSizeBytes) {
+  let fileCount = 0;
+  let totalUncompressedBytes = 0;
+  const containsFileTypes = [];
+
+  try {
+    await tar.t({
+      file: filePath,
+      onentry: (entry) => {
+        if (!entry || entry.type !== "File") return;
+        fileCount += 1;
+        totalUncompressedBytes += Number(entry.size || 0);
+        const entryExt = fileExtension(path.basename(entry.path || ""));
+        if (entryExt) {
+          containsFileTypes.push(entryExt);
+        }
+      }
+    });
+
+    const compressionRatio =
+      archiveSizeBytes > 0 ? toFixedNumber(totalUncompressedBytes / archiveSizeBytes) : null;
+    return buildArchiveMetadata({
+      containsFileTypes,
+      fileCount,
+      passwordProtected: false,
+      compressionRatio
+    });
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function inspectArchiveMetadata(filePath, ext, archiveSizeBytes) {
+  if (!filePath || !ext || !isArchiveExtension(ext)) return null;
+
+  if (ext === "zip") {
+    return inspectZipArchive(filePath);
+  }
+
+  if (isTarLikeArchive(filePath, ext)) {
+    return inspectTarArchive(filePath, archiveSizeBytes);
+  }
+
+  return null;
+}
+
+function summarizeArchiveMetadata(attachments = []) {
+  const archiveItems = attachments
+    .map((attachment) => attachment?.archive)
+    .filter((archive) => archive && typeof archive === "object");
+
+  if (archiveItems.length === 0) {
+    return {
+      contains_file_types: [],
+      file_count: 0,
+      password_protected: false,
+      compression_ratio: null
+    };
+  }
+
+  const containsFileTypes = unique(
+    archiveItems
+      .flatMap((archive) => (Array.isArray(archive.contains_file_types) ? archive.contains_file_types : []))
+      .map((ext) => lower(ext))
+      .filter(Boolean)
+  ).sort();
+
+  const fileCount = archiveItems.reduce((sum, archive) => sum + Number(archive.file_count || 0), 0);
+  const passwordProtected = archiveItems.some((archive) => Boolean(archive.password_protected));
+  const compressionRatios = archiveItems
+    .map((archive) => Number(archive.compression_ratio))
+    .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
+  const compressionRatio =
+    compressionRatios.length > 0
+      ? toFixedNumber(compressionRatios.reduce((sum, ratio) => sum + ratio, 0) / compressionRatios.length)
+      : null;
+
+  return {
+    contains_file_types: containsFileTypes,
+    file_count: fileCount,
+    password_protected: passwordProtected,
+    compression_ratio: compressionRatio
+  };
 }
 
 function normalizeAttachmentPaths(args) {
@@ -293,7 +485,7 @@ function normalizeProvidedAttachments(value) {
     .filter(Boolean);
 }
 
-function deriveContextAttachments(req, args) {
+async function deriveContextAttachments(req, args) {
   const provided = normalizeProvidedAttachments(req.body?.context?.attachments);
   const paths = unique(normalizeAttachmentPaths(args));
 
@@ -340,10 +532,29 @@ function deriveContextAttachments(req, args) {
   const seen = new Set();
 
   for (const attachment of merged) {
-    const key = `${attachment.path || ""}|${attachment.name || ""}`;
+    const normalizedPath = typeof attachment.path === "string" ? attachment.path.trim() : "";
+    const normalizedName = typeof attachment.name === "string" ? attachment.name.trim() : "";
+    const key = normalizedPath ? `path:${normalizedPath}` : `name:${normalizedName}`;
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(attachment);
+  }
+
+  for (const attachment of deduped) {
+    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || ""));
+    if (!isArchiveExtension(ext)) continue;
+    if (attachment.archive && typeof attachment.archive === "object") continue;
+    if (!attachment.path || typeof attachment.path !== "string") continue;
+
+    const archive = await inspectArchiveMetadata(
+      attachment.path,
+      ext,
+      Number(attachment.size_bytes || 0)
+    );
+
+    if (archive) {
+      attachment.archive = archive;
+    }
   }
 
   return deduped;
@@ -385,10 +596,11 @@ function extractToolError(result) {
   return null;
 }
 
-function buildOpaInput(req, toolName, args) {
+async function buildOpaInput(req, toolName, args) {
   const requesterIp = getRequesterIp(req);
   const authenticatedUser = getAuthenticatedUser(req);
-  const headers = collectOpaHeaders(req);
+  const httpRequest = buildHttpRequestSnapshot(req);
+  const headers = httpRequest.headers;
 
   const recipients = unique([
     ...normalizeEmailList(args?.to),
@@ -400,7 +612,7 @@ function buildOpaInput(req, toolName, args) {
   const userInput = req.body?.context?.userInput || null;
 
   const attachmentMeta = deriveAttachmentMetadata(args);
-  const contextAttachments = deriveContextAttachments(req, args);
+  const contextAttachments = await deriveContextAttachments(req, args);
 
   const opaInput = {
     tool: {
@@ -413,10 +625,7 @@ function buildOpaInput(req, toolName, args) {
       token: headers["x-entra-token"] || headers.authorization || null
     },
     request: {
-      method: req.method,
-      path: req.path,
-      headers,
-      body: req.body || null
+      ...httpRequest
     },
     context: {
       recipient_count: recipients.length,
@@ -447,9 +656,7 @@ function buildOpaInput(req, toolName, args) {
 
 function redactOpaInput(input) {
   if (!input || typeof input !== "object") return input;
-  const headers = { ...(input.request?.headers || {}) };
-  if (headers.authorization) headers.authorization = "[redacted]";
-  if (headers["x-entra-token"]) headers["x-entra-token"] = "[redacted]";
+  const headers = redactHeaders(input.request?.headers || {});
 
   return {
     ...input,
@@ -488,14 +695,14 @@ function normalizeOpaDecision(payload) {
   return { allow: false, reason: "invalid_opa_response", raw: payload };
 }
 
-async function callOpaDecision(req, toolName, args) {
+async function callOpaDecision(req, toolName, args, prebuiltInput = null) {
   if (!OPA_ENABLED) {
     return { allow: true, reason: "opa_disabled", raw: null };
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPA_TIMEOUT_MS);
-  const input = buildOpaInput(req, toolName, args);
+  const input = prebuiltInput || (await buildOpaInput(req, toolName, args));
   if (DEBUG) {
     debugLog("OPA request", { url: OPA_DECISION_URL, input: redactOpaInput(input) });
   }
@@ -697,6 +904,16 @@ app.post("/call-tool", async (req, res) => {
   let auditErrorCode = null;
   let auditErrorMessage = null;
   try {
+    if (DEBUG) {
+      const requestSnapshot = buildHttpRequestSnapshot(req);
+      debugLog("Incoming HTTP request", {
+        request: {
+          ...requestSnapshot,
+          headers: redactHeaders(requestSnapshot.headers)
+        }
+      });
+    }
+
     const { name, arguments: args } = req.body || {};
     const normalizedArgs = normalizeToolArguments(name, args);
     const authenticatedUser = getAuthenticatedUser(req);
@@ -765,11 +982,11 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const opaDecision = await callOpaDecision(req, name, normalizedArgs);
+    const opaRequest = await buildOpaInput(req, name, normalizedArgs);
+    const opaDecision = await callOpaDecision(req, name, normalizedArgs, opaRequest);
     const requesterIp = getRequesterIp(req);
     const targetUserId = deriveTarget(normalizedArgs);
 
-    const opaRequest = buildOpaInput(req, name, normalizedArgs);
     const requestId = req.body?.request_id || (demoRequestIdGenerator ? demoRequestIdGenerator.nextId() : `Request-${crypto.randomBytes(6).toString("hex")}`);
     immudbLogger
       .recordPolicyDecision({

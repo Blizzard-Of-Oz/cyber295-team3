@@ -73,6 +73,27 @@ export class McpClientManager {
         this.log("Invalid demo timestamp format", { timestamp: context.demoTimestamp, error: error.message });
       }
     }
+
+    const contextAttachments = Array.isArray(context.availableAttachmentMetadata)
+      ? context.availableAttachmentMetadata
+          .map((entry) => {
+            const filePath = typeof entry?.path === "string" ? entry.path.trim() : "";
+            if (!filePath) return null;
+            const displayName =
+              typeof entry?.displayName === "string" && entry.displayName.trim().length > 0
+                ? entry.displayName.trim()
+                : null;
+            const displaySize = Number(entry?.displaySizeBytes);
+
+            return {
+              path: filePath,
+              name: displayName,
+              size_bytes: Number.isFinite(displaySize) && displaySize >= 0 ? displaySize : null
+            };
+          })
+          .filter(Boolean)
+      : [];
+
     const response = await fetch(`${this.baseUrl}/call-tool`, {
       method: "POST",
       headers,
@@ -81,7 +102,8 @@ export class McpClientManager {
         arguments: args,
         context: {
           userInput: context.userInput || null,
-          correlationId: context.correlationId || null
+          correlationId: context.correlationId || null,
+          attachments: contextAttachments
         }
       })
     });
