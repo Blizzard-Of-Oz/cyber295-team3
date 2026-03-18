@@ -28,6 +28,19 @@ const LONG_QUERY_STRING_THRESHOLD = 80;
 const SUSPICIOUS_QUERY_VALUE_LENGTH = 24;
 const HIGH_ENTROPY_SUBDOMAIN_THRESHOLD = 3.3;
 const HIGH_ENTROPY_SUBDOMAIN_LENGTH = 12;
+const SUSPICIOUS_DOMAIN_KEYWORDS = [
+  "exfil",
+  "c2",
+  "command-and-control",
+  "beacon",
+  "payload",
+  "tunnel",
+  "dns",
+  "covert",
+  "steal",
+  "drop",
+  "collector"
+];
 
 function debugLog(message, meta) {
   if (!DEBUG) return;
@@ -276,6 +289,15 @@ function looksBase64ish(value, minLength = SUSPICIOUS_QUERY_VALUE_LENGTH) {
   return BASE64ISH_REGEX.test(normalized);
 }
 
+function collectSuspiciousKeywords(...parts) {
+  const haystack = parts
+    .filter((part) => typeof part === "string" && part.trim())
+    .map((part) => part.toLowerCase())
+    .join("\n");
+
+  return SUSPICIOUS_DOMAIN_KEYWORDS.filter((keyword) => haystack.includes(keyword));
+}
+
 function analyzeUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
@@ -296,6 +318,9 @@ function analyzeUrl(rawUrl) {
       subdomainEntropy >= HIGH_ENTROPY_SUBDOMAIN_THRESHOLD;
     const longQueryString = queryString.length >= LONG_QUERY_STRING_THRESHOLD;
     const suspiciousQueryPayload = suspiciousQueryValues.length > 0;
+    const suspiciousDomainKeywords = collectSuspiciousKeywords(hostname, domain, rawUrl);
+    const suspiciousDomainPattern = suspiciousDomainKeywords.length > 0;
+    const suspiciousHostnamePattern = suspiciousDomainKeywords.some((keyword) => hostname.includes(keyword));
 
     return {
       original_url: rawUrl,
@@ -309,6 +334,9 @@ function analyzeUrl(rawUrl) {
       suspicious_query_value_lengths: suspiciousQueryValues.map((value) => value.length),
       subdomain_length: subdomain.length,
       subdomain_entropy: subdomainEntropy,
+      suspicious_domain_keywords: suspiciousDomainKeywords,
+      suspicious_domain_pattern: suspiciousDomainPattern,
+      suspicious_hostname_pattern: suspiciousHostnamePattern,
       looks_base64_subdomain: looksBase64Subdomain,
       high_entropy_subdomain: highEntropySubdomain,
       long_query_string: longQueryString,
@@ -325,6 +353,8 @@ function analyzeUrls(parts) {
     (entry) =>
       entry.looks_base64_subdomain ||
       entry.high_entropy_subdomain ||
+      entry.suspicious_domain_pattern ||
+      entry.suspicious_hostname_pattern ||
       entry.long_query_string ||
       entry.suspicious_query_payload
   );
@@ -338,6 +368,8 @@ function analyzeUrls(parts) {
       flagged_reasons: {
         base64_subdomain_count: flagged.filter((entry) => entry.looks_base64_subdomain).length,
         high_entropy_subdomain_count: flagged.filter((entry) => entry.high_entropy_subdomain).length,
+        suspicious_domain_pattern_count: flagged.filter((entry) => entry.suspicious_domain_pattern).length,
+        suspicious_hostname_pattern_count: flagged.filter((entry) => entry.suspicious_hostname_pattern).length,
         long_query_string_count: flagged.filter((entry) => entry.long_query_string).length,
         suspicious_query_payload_count: flagged.filter((entry) => entry.suspicious_query_payload).length
       }

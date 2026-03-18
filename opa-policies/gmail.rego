@@ -61,7 +61,22 @@ deny[reason] if {
 	input.tool.name == "send_email"
 	some url in object.get(input.context, "urls", [])
 	object.get(url, "suspicious_query_payload", false) == true
-	reason := "base64-like payload in query string detected"
+	reason := "suspicious encoded url payload detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	object.get(input.context, "dns_tunneling_detected", false) == true
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "suspicious_domain_pattern", false) == true
+	reason := "dns tunneling / suspicious c2 domain detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "suspicious_hostname_pattern", false) == true
+	reason := "suspicious exfiltration domain detected"
 }
 
 deny[reason] if {
