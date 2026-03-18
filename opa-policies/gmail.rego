@@ -51,6 +51,12 @@ deny[reason] {
 	reason := sprintf("recipient %s is blocked", [blocked])
 }
 
+deny[reason] {
+	input.tool.name == "send_email"
+	input.context.urgency_manipulation == true
+	reason := "urgency manipulation detected"
+}
+
 allow {
 	count(deny) == 0
 }

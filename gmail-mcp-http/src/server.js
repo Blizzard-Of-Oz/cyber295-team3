@@ -8,7 +8,6 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { ImmuDBLogger } from "./immudb-logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
 const port = process.env.MCP_HTTP_PORT || 5001;
 const DEBUG = process.env.DEBUG === "true";
 const OPA_ENABLED = process.env.OPA_ENABLED !== "false";
@@ -16,6 +15,13 @@ const OPA_DECISION_URL =
   process.env.OPA_DECISION_URL || "http://localhost:8181/v1/data/gmail/decision";
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
+const URGENCY_PATTERNS = [
+  { keyword: "URGENT", regex: /\burgent\b/i, score: 3 },
+  { keyword: "IMMEDIATELY", regex: /\bimmediately\b/i, score: 2 },
+  { keyword: "DO NOT DELAY", regex: /\bdo not delay\b/i, score: 2 },
+  { keyword: "CEO DEMANDS", regex: /\bceo demands?\b/i, score: 2 },
+  { keyword: "NOW", regex: /\bnow\b/i, score: 1 }
+];
 
 function debugLog(message, meta) {
   if (!DEBUG) return;
@@ -25,8 +31,6 @@ function debugLog(message, meta) {
     console.log(`[gmail-mcp-http][debug] ${message}`);
   }
 }
-
-app.use(express.json({ limit: "1mb" }));
 
 function resolveDefaultMcpCommand() {
   const localServerPath = path.resolve(
@@ -182,6 +186,97 @@ function extractToolError(result) {
   return null;
 }
 
+function normalizeRecipients(value) {
+  if (Array.isArray(value)) {
+    return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
+  }
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+  return [];
+}
+
+function getContentText(args = {}, providedContext = {}) {
+  if (typeof providedContext.content_text === "string" && providedContext.content_text.trim()) {
+    return providedContext.content_text;
+  }
+  const subject = typeof args.subject === "string" ? args.subject : "";
+  const body = typeof args.body === "string" ? args.body : "";
+  const combined = [subject, body].filter(Boolean).join("\n");
+  return combined ? `${combined}\n` : "";
+}
+
+function detectUrgencySignals(parts) {
+  const haystack = parts.filter((part) => typeof part === "string" && part.trim()).join("\n");
+  const matchedKeywords = [];
+  let urgencyScore = 0;
+
+  for (const pattern of URGENCY_PATTERNS) {
+    if (pattern.regex.test(haystack)) {
+      matchedKeywords.push(pattern.keyword);
+      urgencyScore += pattern.score;
+    }
+  }
+
+  return {
+    urgencyManipulation: matchedKeywords.length > 0,
+    urgencySignals: {
+      matched_keywords: matchedKeywords,
+      urgency_score: urgencyScore
+    }
+  };
+}
+
+function buildPolicyContext(req, toolName, args) {
+  const requestContext = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
+  const recipients = [
+    ...normalizeRecipients(args?.to),
+    ...normalizeRecipients(args?.cc),
+    ...normalizeRecipients(args?.bcc)
+  ];
+  const contentText = getContentText(args, requestContext);
+  const userInput =
+    typeof requestContext.userInput === "string"
+      ? requestContext.userInput
+      : typeof requestContext.user_input === "string"
+        ? requestContext.user_input
+        : null;
+
+  const baseContext = {
+    recipient_count:
+      typeof requestContext.recipient_count === "number" ? requestContext.recipient_count : recipients.length,
+    recipients: Array.isArray(requestContext.recipients) ? requestContext.recipients : recipients,
+    content_text: contentText,
+    user_input: userInput,
+    attachment_bytes:
+      typeof requestContext.attachment_bytes === "number" ? requestContext.attachment_bytes : 0,
+    attachment_name:
+      typeof requestContext.attachment_name === "string" ? requestContext.attachment_name : null,
+    data_classification:
+      typeof requestContext.data_classification === "string" ? requestContext.data_classification : "none",
+    record_count: typeof requestContext.record_count === "number" ? requestContext.record_count : 0
+  };
+
+  if (toolName !== "send_email") {
+    return baseContext;
+  }
+
+  const urgency = detectUrgencySignals([
+    requestContext.userInput,
+    requestContext.user_input,
+    baseContext.user_input,
+    baseContext.content_text,
+    args?.subject,
+    args?.body
+  ]);
+
+  return {
+    ...baseContext,
+    urgency_manipulation: urgency.urgencyManipulation,
+    urgency_signals: urgency.urgencySignals
+  };
+}
+
 function buildOpaInput(req, toolName, args) {
   const requesterIp = getRequesterIp(req);
   const authenticatedUser = getAuthenticatedUser(req);
@@ -202,7 +297,8 @@ function buildOpaInput(req, toolName, args) {
       path: req.path,
       headers,
       body: req.body || null
-    }
+    },
+    context: buildPolicyContext(req, toolName, args)
   };
 }
 
@@ -305,72 +401,114 @@ const immudbLogger = new ImmuDBLogger({
 
 const mcpClientManager = new McpClientManager();
 
-app.get("/health", async (_req, res) => {
-  debugLog("Health check requested");
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString()
-  });
-});
+function createApp({ mcpClient = mcpClientManager, logger = immudbLogger } = {}) {
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
 
-app.get("/tools", async (_req, res) => {
-  try {
-    debugLog("Tools endpoint requested");
-    const tools = await mcpClientManager.listTools();
-    res.json({ tools });
-  } catch (error) {
-    debugLog("Failed to list tools", { error: error?.message || error });
-    res.status(500).json({ error: error?.message || "Failed to list tools" });
-  }
-});
-
-app.post("/call-tool", async (req, res) => {
-  const startedAt = Date.now();
-  const correlationId = getCorrelationId(req);
-  res.set("x-correlation-id", correlationId);
-  let auditStatus = "failure";
-  let auditSummary = "unknown";
-  let auditErrorCode = null;
-  let auditErrorMessage = null;
-  try {
-    const { name, arguments: args } = req.body || {};
-    const authenticatedUser = getAuthenticatedUser(req);
-    const hasEntraToken = Boolean(req.headers["x-entra-token"]);
-    debugLog("Call tool request received", {
-      name,
-      hasArgs: Boolean(args),
-      authenticatedUser,
-      hasEntraToken
+  app.get("/health", async (_req, res) => {
+    debugLog("Health check requested");
+    res.json({
+      status: "ok",
+      timestamp: new Date().toISOString()
     });
-    if (!name || !args) {
-      return res.status(400).json({ error: "name and arguments are required" });
+  });
+
+  app.get("/tools", async (_req, res) => {
+    try {
+      debugLog("Tools endpoint requested");
+      const tools = await mcpClient.listTools();
+      res.json({ tools });
+    } catch (error) {
+      debugLog("Failed to list tools", { error: error?.message || error });
+      res.status(500).json({ error: error?.message || "Failed to list tools" });
     }
+  });
 
-    const opaDecision = await callOpaDecision(req, name, args);
-    const requesterIp = getRequesterIp(req);
-    const targetUserId = deriveTarget(args);
-
-    const opaRequest = buildOpaInput(req, name, args);
-    immudbLogger
-      .recordPolicyDecision({
+  app.post("/call-tool", async (req, res) => {
+    const startedAt = Date.now();
+    const correlationId = getCorrelationId(req);
+    res.set("x-correlation-id", correlationId);
+    let auditStatus = "failure";
+    let auditSummary = "unknown";
+    let auditErrorCode = null;
+    let auditErrorMessage = null;
+    try {
+      const { name, arguments: args } = req.body || {};
+      const authenticatedUser = getAuthenticatedUser(req);
+      const hasEntraToken = Boolean(req.headers["x-entra-token"]);
+      debugLog("Call tool request received", {
+        name,
+        hasArgs: Boolean(args),
         authenticatedUser,
-        requesterIp,
-        toolName: name,
-        targetUserId,
-        allow: opaDecision.allow,
-        reason: opaDecision.reason,
-        opaRequest: redactOpaInput(opaRequest),
-        opaResponse: opaDecision.raw
-      })
-      .catch((error) => {
-        console.warn("Failed to write immuDB policy log:", error?.message || error);
+        hasEntraToken
       });
+      if (!name || !args) {
+        return res.status(400).json({ error: "name and arguments are required" });
+      }
 
-    if (!opaDecision.allow) {
-      debugLog("OPA denied request", { name, reason: opaDecision.reason });
-      auditStatus = "failure";
-      auditSummary = `${name} denied by policy`;
-      immudbLogger
+      const opaDecision = await callOpaDecision(req, name, args);
+      const requesterIp = getRequesterIp(req);
+      const targetUserId = deriveTarget(args);
+
+      const opaRequest = buildOpaInput(req, name, args);
+      logger
+        .recordPolicyDecision({
+          authenticatedUser,
+          requesterIp,
+          toolName: name,
+          targetUserId,
+          allow: opaDecision.allow,
+          reason: opaDecision.reason,
+          opaRequest: redactOpaInput(opaRequest),
+          opaResponse: opaDecision.raw
+        })
+        .catch((error) => {
+          console.warn("Failed to write immuDB policy log:", error?.message || error);
+        });
+
+      if (!opaDecision.allow) {
+        debugLog("OPA denied request", { name, reason: opaDecision.reason });
+        auditStatus = "failure";
+        auditSummary = `${name} denied by policy`;
+        logger
+          .recordAction({
+            authenticatedUser,
+            requesterIp,
+            targetUserId,
+            action: name,
+            status: auditStatus,
+            durationMs: Date.now() - startedAt,
+            resultSummary: auditSummary,
+            errorCode: "policy_denied",
+            errorMessage: opaDecision.reason,
+            correlationId
+          })
+          .catch((error) => {
+            console.warn("Failed to write immuDB log:", error?.message || error);
+          });
+        return res.status(403).json({
+          error: "Request denied by policy",
+          reason: opaDecision.reason
+        });
+      }
+
+      const result = await mcpClient.callTool(name, args);
+      debugLog("Tool call completed", { name });
+
+      const toolError = extractToolError(result);
+      if (toolError) {
+        auditStatus = "failure";
+        auditSummary = truncateText(toolError.message, 200);
+        auditErrorCode = toolError.code;
+        auditErrorMessage = truncateText(toolError.message);
+      } else {
+        auditStatus = "success";
+        auditSummary = `${name} completed`;
+        auditErrorCode = null;
+        auditErrorMessage = null;
+      }
+
+      logger
         .recordAction({
           authenticatedUser,
           requesterIp,
@@ -379,102 +517,82 @@ app.post("/call-tool", async (req, res) => {
           status: auditStatus,
           durationMs: Date.now() - startedAt,
           resultSummary: auditSummary,
-          errorCode: "policy_denied",
-          errorMessage: opaDecision.reason,
+          errorCode: auditErrorCode,
+          errorMessage: auditErrorMessage,
           correlationId
         })
         .catch((error) => {
           console.warn("Failed to write immuDB log:", error?.message || error);
         });
-      return res.status(403).json({
-        error: "Request denied by policy",
-        reason: opaDecision.reason
-      });
-    }
 
-    const result = await mcpClientManager.callTool(name, args);
-    debugLog("Tool call completed", { name });
-
-    const toolError = extractToolError(result);
-    if (toolError) {
-      auditStatus = "failure";
-      auditSummary = truncateText(toolError.message, 200);
-      auditErrorCode = toolError.code;
-      auditErrorMessage = truncateText(toolError.message);
-    } else {
-      auditStatus = "success";
-      auditSummary = `${name} completed`;
-      auditErrorCode = null;
-      auditErrorMessage = null;
-    }
-
-    immudbLogger
-      .recordAction({
-        authenticatedUser,
+      debugLog("Audit log scheduled", {
+        action: name,
         requesterIp,
         targetUserId,
-        action: name,
         status: auditStatus,
-        durationMs: Date.now() - startedAt,
-        resultSummary: auditSummary,
-        errorCode: auditErrorCode,
-        errorMessage: auditErrorMessage,
         correlationId
-      })
-      .catch((error) => {
-        console.warn("Failed to write immuDB log:", error?.message || error);
       });
 
-    debugLog("Audit log scheduled", {
-      action: name,
-      requesterIp,
-      targetUserId,
-      status: auditStatus,
-      correlationId
-    });
-
-    res.json({ success: true, result, correlationId });
-  } catch (error) {
-    auditErrorCode = error?.code || error?.name || "unknown";
-    auditErrorMessage = truncateText(error?.message || String(error));
-    auditSummary = "tool call failed";
-    debugLog("Tool call failed", { error: error?.message || error });
-    try {
-      const { name, arguments: args } = req.body || {};
-      const authenticatedUser = getAuthenticatedUser(req);
-      const requesterIp = getRequesterIp(req);
-      const targetUserId = deriveTarget(args);
-      immudbLogger
-        .recordAction({
-          authenticatedUser,
-          requesterIp,
-          targetUserId,
-          action: name || "unknown",
-          status: auditStatus,
-          durationMs: Date.now() - startedAt,
-          resultSummary: auditSummary,
-          errorCode: auditErrorCode,
-          errorMessage: auditErrorMessage,
-          correlationId
-        })
-        .catch((logError) => {
-          console.warn("Failed to write immuDB log:", logError?.message || logError);
-        });
-    } catch (logError) {
-      console.warn("Failed to build immuDB log payload:", logError?.message || logError);
+      res.json({ success: true, result, correlationId });
+    } catch (error) {
+      auditErrorCode = error?.code || error?.name || "unknown";
+      auditErrorMessage = truncateText(error?.message || String(error));
+      auditSummary = "tool call failed";
+      debugLog("Tool call failed", { error: error?.message || error });
+      try {
+        const { name, arguments: args } = req.body || {};
+        const authenticatedUser = getAuthenticatedUser(req);
+        const requesterIp = getRequesterIp(req);
+        const targetUserId = deriveTarget(args);
+        logger
+          .recordAction({
+            authenticatedUser,
+            requesterIp,
+            targetUserId,
+            action: name || "unknown",
+            status: auditStatus,
+            durationMs: Date.now() - startedAt,
+            resultSummary: auditSummary,
+            errorCode: auditErrorCode,
+            errorMessage: auditErrorMessage,
+            correlationId
+          })
+          .catch((logError) => {
+            console.warn("Failed to write immuDB log:", logError?.message || logError);
+          });
+      } catch (logError) {
+        console.warn("Failed to build immuDB log payload:", logError?.message || logError);
+      }
+      res.status(500).json({ error: error?.message || "Tool call failed", correlationId });
     }
-    res.status(500).json({ error: error?.message || "Tool call failed", correlationId });
-  }
-});
+  });
 
-const server = app.listen(port, () => {
-  console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
-  if (DEBUG) {
-    console.log("[gmail-mcp-http][debug] Debug logging enabled");
-  }
-});
+  return app;
+}
 
-process.on("SIGINT", async () => {
-  await mcpClientManager.close();
-  server.close(() => process.exit(0));
-});
+let server = null;
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  const app = createApp();
+  server = app.listen(port, () => {
+    console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
+    if (DEBUG) {
+      console.log("[gmail-mcp-http][debug] Debug logging enabled");
+    }
+  });
+
+  process.on("SIGINT", async () => {
+    await mcpClientManager.close();
+    server.close(() => process.exit(0));
+  });
+}
+
+export {
+  buildOpaInput,
+  buildPolicyContext,
+  callOpaDecision,
+  createApp,
+  detectUrgencySignals,
+  normalizeOpaDecision,
+  redactOpaInput
+};
