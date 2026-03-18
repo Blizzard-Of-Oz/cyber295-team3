@@ -57,6 +57,34 @@ deny[reason] if {
 	reason := "urgency manipulation detected"
 }
 
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "suspicious_query_payload", false) == true
+	reason := "base64-like payload in query string detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "looks_base64_subdomain", false) == true
+	reason := "dns tunneling / suspicious encoded url detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "high_entropy_subdomain", false) == true
+	reason := "high-entropy subdomain detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "long_query_string", false) == true
+	reason := "dns tunneling / suspicious encoded url detected"
+}
+
 allow if {
 	count(deny) == 0
 }
