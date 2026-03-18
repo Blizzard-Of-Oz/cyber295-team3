@@ -13,11 +13,13 @@ This service wraps the Gmail MCP stdio server and exposes HTTP endpoints, while 
 For `send_email` and `draft_email`, the wrapper now normalizes attachment inputs and enriches OPA context:
 
 - Accepts `attachments` (array of file paths), `attachmentPath`, or `attachment_path`
+- Enforces an attachment sandbox: all paths must be inside `ATTACHMENT_SANDBOX_ROOT`
 - Computes `context.attachment_bytes` from existing local files when explicit byte values are not provided
 - Sets `context.attachment_name` from attachment filenames when not explicitly provided
 - Adds `context.attachment_count`
 
 This prevents attachment fields from remaining `0`/`null` when file-path attachments are supplied.
+It also blocks local file inclusion from arbitrary host paths.
 
 ## Setup
 
@@ -48,6 +50,9 @@ MCP_ARGS=/absolute/path/to/mcp-server/gmail/dist/index.js
 # HTTP
 MCP_HTTP_PORT=3301
 DEBUG=false
+
+# Attachment sandbox (defaults to AGENT_UPLOAD_TEMP_DIR, then /tmp/agent-ui-attachments)
+ATTACHMENT_SANDBOX_ROOT=/tmp/agent-ui-attachments
 
 # OPA
 OPA_ENABLED=true

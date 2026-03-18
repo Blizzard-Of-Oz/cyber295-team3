@@ -4,6 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import * as tar from "tar";
 import yauzl from "yauzl";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -23,6 +24,16 @@ const OPA_DECISION_URL =
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
 const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
+const ATTACHMENT_SANDBOX_ROOT = path.resolve(
+  process.env.ATTACHMENT_SANDBOX_ROOT ||
+    process.env.AGENT_UPLOAD_TEMP_DIR ||
+    path.join(os.tmpdir(), "agent-ui-attachments")
+);
+const ATTACHMENT_SANDBOX_SOURCE = process.env.ATTACHMENT_SANDBOX_ROOT
+  ? "ATTACHMENT_SANDBOX_ROOT"
+  : process.env.AGENT_UPLOAD_TEMP_DIR
+    ? "AGENT_UPLOAD_TEMP_DIR"
+    : "default";
 const SENSITIVE_HEADER_NAMES = [
   "authorization",
   "x-entra-token",
@@ -209,6 +220,90 @@ function normalizeEmailList(value) {
 
 function unique(array) {
   return [...new Set(array)];
+}
+
+function resolveCanonicalPathIfExists(targetPath) {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch (_error) {
+    return targetPath;
+  }
+}
+
+const ATTACHMENT_SANDBOX_ROOT_CANONICAL = resolveCanonicalPathIfExists(ATTACHMENT_SANDBOX_ROOT);
+
+function isPathWithinDirectory(targetPath, directoryPath) {
+  const relative = path.relative(directoryPath, targetPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function validateAttachmentPath(filePath) {
+  const normalized = typeof filePath === "string" ? filePath.trim() : "";
+  if (!normalized) {
+    return { allowed: false, reason: "empty_path" };
+  }
+
+  const resolvedPath = path.resolve(normalized);
+  const insideLexicalSandbox = isPathWithinDirectory(resolvedPath, ATTACHMENT_SANDBOX_ROOT);
+  const insideCanonicalSandbox = isPathWithinDirectory(
+    resolvedPath,
+    ATTACHMENT_SANDBOX_ROOT_CANONICAL
+  );
+  if (!insideLexicalSandbox && !insideCanonicalSandbox) {
+    return {
+      allowed: false,
+      reason: "outside_sandbox",
+      inputPath: normalized,
+      resolvedPath
+    };
+  }
+
+  try {
+    const realPath = fs.realpathSync(resolvedPath);
+    const insideRealLexicalSandbox = isPathWithinDirectory(realPath, ATTACHMENT_SANDBOX_ROOT);
+    const insideRealCanonicalSandbox = isPathWithinDirectory(
+      realPath,
+      ATTACHMENT_SANDBOX_ROOT_CANONICAL
+    );
+    if (!insideRealLexicalSandbox && !insideRealCanonicalSandbox) {
+      return {
+        allowed: false,
+        reason: "outside_sandbox_symlink",
+        inputPath: normalized,
+        resolvedPath: realPath
+      };
+    }
+  } catch (_error) {
+    // If the file does not exist yet, keep the lexical path check result.
+  }
+
+  return {
+    allowed: true,
+    path: resolvedPath
+  };
+}
+
+function enforceAttachmentSandbox(paths = []) {
+  const allowedPaths = [];
+  const rejectedPaths = [];
+
+  for (const filePath of paths) {
+    const validation = validateAttachmentPath(filePath);
+    if (validation.allowed) {
+      allowedPaths.push(validation.path);
+    } else {
+      rejectedPaths.push({
+        path: typeof filePath === "string" ? filePath : "",
+        reason: validation.reason,
+        resolvedPath: validation.resolvedPath || null
+      });
+    }
+  }
+
+  return {
+    allowedPaths: unique(allowedPaths),
+    rejectedPaths
+  };
 }
 
 function fileExtension(value) {
@@ -563,10 +658,30 @@ async function deriveContextAttachments(req, args) {
 function normalizeToolArguments(name, args) {
   const normalized = args && typeof args === "object" ? { ...args } : {};
   if (name === "send_email" || name === "draft_email") {
-    const attachments = normalizeAttachmentPaths(normalized);
-    if (attachments.length > 0) {
-      normalized.attachments = unique(attachments);
+    const attachmentPaths = normalizeAttachmentPaths(normalized);
+    const { allowedPaths, rejectedPaths } = enforceAttachmentSandbox(attachmentPaths);
+
+    if (rejectedPaths.length > 0) {
+      const error = new Error(
+        `Attachment paths must be within sandbox directory: ${ATTACHMENT_SANDBOX_ROOT}`
+      );
+      error.code = "invalid_attachment_path";
+      error.statusCode = 400;
+      error.details = {
+        sandboxRoot: ATTACHMENT_SANDBOX_ROOT,
+        rejectedPaths
+      };
+      throw error;
     }
+
+    if (allowedPaths.length > 0) {
+      normalized.attachments = allowedPaths;
+    } else {
+      delete normalized.attachments;
+    }
+
+    delete normalized.attachmentPath;
+    delete normalized.attachment_path;
   }
   return normalized;
 }
@@ -1110,14 +1225,22 @@ app.post("/call-tool", async (req, res) => {
   } catch (error) {
     auditErrorCode = error?.code || error?.name || "unknown";
     auditErrorMessage = truncateText(error?.message || String(error));
-    auditSummary = "tool call failed";
+    auditSummary = truncateText(error?.message || "tool call failed", 200);
     debugLog("Tool call failed", { error: error?.message || error });
     try {
       const { name, arguments: args } = req.body || {};
-      const normalizedArgs = normalizeToolArguments(name, args);
+      const rawArgs = args && typeof args === "object" ? { ...args } : {};
+      let argsForAudit = rawArgs;
+      try {
+        // Best-effort normalization for audit target extraction only.
+        // If normalization fails (e.g., invalid attachment path), keep raw args.
+        argsForAudit = normalizeToolArguments(name, rawArgs);
+      } catch (_normalizeError) {
+        argsForAudit = rawArgs;
+      }
       const authenticatedUser = getAuthenticatedUser(req);
       const requesterIp = getRequesterIp(req);
-      const targetUserId = deriveTarget(normalizedArgs);
+      const targetUserId = deriveTarget(argsForAudit);
       immudbLogger
         .recordAction({
           authenticatedUser,
@@ -1137,7 +1260,11 @@ app.post("/call-tool", async (req, res) => {
     } catch (logError) {
       console.warn("Failed to build immuDB log payload:", logError?.message || logError);
     }
-    res.status(500).json({ error: error?.message || "Tool call failed", correlationId });
+    const statusCode = Number.isInteger(error?.statusCode) ? Number(error.statusCode) : 500;
+    const payload = { error: error?.message || "Tool call failed", correlationId };
+    if (error?.code) payload.code = error.code;
+    if (error?.details) payload.details = error.details;
+    res.status(statusCode).json(payload);
   }
 });
 
@@ -1145,6 +1272,14 @@ app.post("/call-tool", async (req, res) => {
 
 const server = app.listen(port, () => {
   console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
+  console.log(
+    `[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT} (source=${ATTACHMENT_SANDBOX_SOURCE})`
+  );
+  if (ATTACHMENT_SANDBOX_ROOT_CANONICAL !== ATTACHMENT_SANDBOX_ROOT) {
+    console.log(
+      `[gmail-mcp-http] Attachment sandbox canonical root: ${ATTACHMENT_SANDBOX_ROOT_CANONICAL}`
+    );
+  }
   if (DEBUG) {
     console.log("[gmail-mcp-http][debug] Debug logging enabled");
   }
