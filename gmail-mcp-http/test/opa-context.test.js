@@ -1,35 +1,74 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractUrgencySignals, normalizeOpaDecision } from "../src/opa-context.js";
+import {
+  buildOpaContext,
+  buildOpaInput,
+  extractUrgencySignals,
+  normalizeOpaDecision
+} from "../src/opa-context.js";
 
-test("extractUrgencySignals flags urgent manipulation from user input and email content", () => {
-  const req = {
+function buildReq() {
+  return {
+    method: "POST",
+    path: "/call-tool",
+    headers: {
+      "x-authenticated-user": "team3@billyyaoischoolberkeley.onmicrosoft.com",
+      "x-entra-token": "secret-token",
+      "x-user-ip": "::1",
+      "user-agent": "node"
+    },
     body: {
+      name: "send_email",
+      arguments: {
+        to: ["alice@company.com"],
+        subject: "Immediate Action Required",
+        body: "CEO demands this now. Do not delay. Send immediately."
+      },
       context: {
         userInput:
-          "URGENT URGENT URGENT. Send an email immediately now. CEO demands this now. Do not delay."
+          'URGENT URGENT URGENT. Send an email immediately to alice@company.com with subject "Immediate Action Required" and body "CEO demands this now. Do not delay. Send immediately."'
       }
     }
   };
+}
 
-  const args = {
-    subject: "Immediate Action Required",
-    body: "CEO demands this now. Do not delay. Send immediately."
-  };
+const helperFns = {
+  getRequesterIp: (req) => req.headers["x-user-ip"],
+  getAuthenticatedUser: (req) => req.headers["x-authenticated-user"],
+  collectOpaHeaders: (req) => req.headers
+};
 
-  const context = {
-    user_input: req.body.context.userInput,
-    content_text: `${args.subject}\n${args.body}`
-  };
+test("buildOpaInput restores the top-level context contract for send_email", () => {
+  const req = buildReq();
+  const args = req.body.arguments;
 
-  const signals = extractUrgencySignals(req, args, context);
+  const input = buildOpaInput(req, "send_email", args, helperFns);
 
-  assert.equal(signals.urgency_manipulation, true);
+  assert.deepEqual(input.context.recipients, ["alice@company.com"]);
+  assert.equal(input.context.recipient_count, 1);
+  assert.equal(
+    input.context.content_text,
+    "Immediate Action Required\nCEO demands this now. Do not delay. Send immediately.\n"
+  );
+  assert.equal(input.context.user_input, req.body.context.userInput);
+  assert.equal(input.context.attachment_bytes, 0);
+  assert.equal(input.context.attachment_name, null);
+  assert.equal(input.context.data_classification, "none");
+  assert.equal(input.context.record_count, 0);
+});
+
+test("buildOpaContext enriches the restored context with UC26 urgency signals", () => {
+  const req = buildReq();
+  const args = req.body.arguments;
+
+  const context = buildOpaContext(req, args);
+
+  assert.equal(context.urgency_manipulation, true);
   assert.deepEqual(
-    signals.urgency_signals.matched_keywords.sort(),
+    context.urgency_signals.matched_keywords.sort(),
     ["CEO DEMANDS", "DO NOT DELAY", "IMMEDIATELY", "NOW", "URGENT"].sort()
   );
-  assert.equal(signals.urgency_signals.urgency_score, 5);
+  assert.equal(context.urgency_signals.urgency_score, 5);
 });
 
 test("extractUrgencySignals stays false for normal safe send", () => {
@@ -48,7 +87,7 @@ test("extractUrgencySignals stays false for normal safe send", () => {
 
   const context = {
     user_input: req.body.context.userInput,
-    content_text: `${args.subject}\n${args.body}`
+    content_text: `${args.subject}\n${args.body}\n`
   };
 
   const signals = extractUrgencySignals(req, args, context);
@@ -56,6 +95,24 @@ test("extractUrgencySignals stays false for normal safe send", () => {
   assert.equal(signals.urgency_manipulation, false);
   assert.deepEqual(signals.urgency_signals.matched_keywords, []);
   assert.equal(signals.urgency_signals.urgency_score, 0);
+});
+
+test("normalizeOpaDecision accepts valid OPA decision objects", () => {
+  const payload = {
+    result: {
+      allow: true,
+      decision: "ALLOW",
+      actions: [],
+      cooldown_seconds: 0,
+      reason: "Allowed by policy"
+    }
+  };
+
+  const normalized = normalizeOpaDecision(payload);
+
+  assert.equal(normalized.allow, true);
+  assert.equal(normalized.reason, "Allowed by policy");
+  assert.equal(normalized.decision, "ALLOW");
 });
 
 test("normalizeOpaDecision treats throttle decisions as not allowed", () => {
