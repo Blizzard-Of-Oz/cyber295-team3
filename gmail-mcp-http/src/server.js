@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
-import { buildOpaInput, normalizeOpaDecision } from "./opa-context.js";
+import { extractUrgencySignals, normalizeOpaDecision } from "./opa-context.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -183,6 +183,67 @@ function extractToolError(result) {
   return null;
 }
 
+
+function buildOpaContext(req, args = {}) {
+  const requestContext = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
+  const recipients = Array.isArray(args.to)
+    ? args.to.filter((value) => typeof value === "string" && value.trim())
+    : typeof args.to === "string" && args.to.trim()
+      ? [args.to.trim()]
+      : [];
+  const subject = typeof args.subject === "string" ? args.subject : "";
+  const body = typeof args.body === "string" ? args.body : "";
+  const attachmentName = Array.isArray(args.attachments) && args.attachments.length > 0
+    ? args.attachments[0]?.filename || args.attachments[0]?.name || null
+    : requestContext.attachment_name || requestContext.attachmentName || null;
+  const baseContext = {
+    recipient_count: recipients.length,
+    recipients,
+    content_text: subject || body ? `${subject}
+${body}
+` : "",
+    user_input: typeof requestContext.userInput === "string"
+      ? requestContext.userInput
+      : typeof requestContext.user_input === "string"
+        ? requestContext.user_input
+        : "",
+    attachment_bytes: Number(requestContext.attachment_bytes ?? requestContext.attachmentBytes) || 0,
+    attachment_name: attachmentName,
+    data_classification: requestContext.data_classification ?? requestContext.dataClassification ?? "none",
+    record_count: Number(requestContext.record_count ?? requestContext.recordCount) || 0
+  };
+
+  return {
+    ...baseContext,
+    ...extractUrgencySignals(req, args, baseContext)
+  };
+}
+
+function buildOpaInput(req, toolName, args) {
+  const requesterIp = getRequesterIp(req);
+  const authenticatedUser = getAuthenticatedUser(req);
+  const headers = collectOpaHeaders(req);
+
+  return {
+    tool: {
+      name: toolName,
+      arguments: args
+    },
+    requester: {
+      ip: requesterIp,
+      identity: authenticatedUser,
+      token: headers["x-entra-token"] || headers.authorization || null
+    },
+    request: {
+      method: req.method,
+      path: req.path,
+      headers,
+      body: req.body || null
+    },
+    context: buildOpaContext(req, args)
+  };
+}
+
 function redactOpaInput(input) {
   if (!input || typeof input !== "object") return input;
   const headers = { ...(input.request?.headers || {}) };
@@ -209,11 +270,7 @@ async function callOpaDecision(req, toolName, args) {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPA_TIMEOUT_MS);
-  const input = buildOpaInput(req, toolName, args, {
-    getRequesterIp,
-    getAuthenticatedUser,
-    collectOpaHeaders
-  });
+  const input = buildOpaInput(req, toolName, args);
   if (DEBUG) {
     debugLog("OPA request", { url: OPA_DECISION_URL, input: redactOpaInput(input) });
   }
@@ -318,11 +375,7 @@ app.post("/call-tool", async (req, res) => {
     const requesterIp = getRequesterIp(req);
     const targetUserId = deriveTarget(args);
 
-    const opaRequest = buildOpaInput(req, name, args, {
-      getRequesterIp,
-      getAuthenticatedUser,
-      collectOpaHeaders
-    });
+    const opaRequest = buildOpaInput(req, name, args);
     immudbLogger
       .recordPolicyDecision({
         authenticatedUser,
