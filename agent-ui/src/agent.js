@@ -121,7 +121,9 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     const rootDir =
       typeof context?.generatedAttachmentDir === "string" && context.generatedAttachmentDir.trim().length > 0
         ? context.generatedAttachmentDir
-        : path.join(os.tmpdir(), "agent-ui-generated");
+        : process.env.AGENT_UPLOAD_TEMP_DIR ||
+          process.env.ATTACHMENT_SANDBOX_ROOT ||
+          path.join(os.tmpdir(), "agent-ui-attachments");
 
     await fs.mkdir(rootDir, { recursive: true });
 

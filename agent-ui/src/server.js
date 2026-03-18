@@ -14,6 +14,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 5000;
 const DEBUG = process.env.DEBUG === "true";
+const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachments");
+const AGENT_UPLOAD_TEMP_DIR =
+  process.env.AGENT_UPLOAD_TEMP_DIR ||
+  process.env.ATTACHMENT_SANDBOX_ROOT ||
+  DEFAULT_ATTACHMENT_SANDBOX_ROOT;
+const ATTACHMENT_SANDBOX_SOURCE = process.env.AGENT_UPLOAD_TEMP_DIR
+  ? "AGENT_UPLOAD_TEMP_DIR"
+  : process.env.ATTACHMENT_SANDBOX_ROOT
+    ? "ATTACHMENT_SANDBOX_ROOT"
+    : "default";
 
 const msalConfig = {
   auth: {
@@ -147,9 +157,13 @@ function createUniqueFilename(baseName, usedNames, fallbackIndex) {
 
 async function materializeRequestAttachments(req) {
   const payload = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
-  const tempRoot = process.env.AGENT_UPLOAD_TEMP_DIR || path.join(os.tmpdir(), "agent-ui-attachments");
-  const requestDir = path.join(tempRoot, crypto.randomBytes(12).toString("hex"));
-  await fs.mkdir(requestDir, { recursive: true });
+  const tempRoot = AGENT_UPLOAD_TEMP_DIR;
+  await fs.mkdir(tempRoot, { recursive: true, mode: 0o700 });
+  await fs.chmod(tempRoot, 0o700).catch(() => {});
+
+  // Create a per-request random directory with restrictive permissions.
+  const requestDir = await fs.mkdtemp(path.join(tempRoot, "req-"));
+  await fs.chmod(requestDir, 0o700).catch(() => {});
 
   if (payload.length === 0) {
     return { paths: [], metadata: [], requestDir, cleanup: async () => {
@@ -167,7 +181,7 @@ async function materializeRequestAttachments(req) {
     const fileBytes = Buffer.from(base64, "base64");
     const filename = createUniqueFilename(entry.name, usedNames, i + 1);
     const filePath = path.join(requestDir, filename);
-    await fs.writeFile(filePath, fileBytes);
+    await fs.writeFile(filePath, fileBytes, { mode: 0o600 });
     paths.push(filePath);
 
     const displayName = typeof entry.displayName === "string" && entry.displayName.trim()
@@ -349,6 +363,9 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
 
 app.listen(port, () => {
   console.log(`Agent UI server running on http://localhost:${port}`);
+  console.log(
+    `[agent-ui] Attachment sandbox root: ${AGENT_UPLOAD_TEMP_DIR} (source=${ATTACHMENT_SANDBOX_SOURCE})`
+  );
   if (DEBUG) {
     console.log("[agent-ui][debug] Debug logging enabled");
   }
