@@ -90,20 +90,40 @@ export class ImmuDBLogger {
     const ddlPolicy =
       "CREATE TABLE IF NOT EXISTS mcp_policy_decisions(" +
       "id INTEGER AUTO_INCREMENT," +
+      "request_id VARCHAR," +
       "authenticated_user VARCHAR," +
       "requester_ip VARCHAR," +
       "tool_name VARCHAR," +
       "target_user_id VARCHAR," +
       "allow VARCHAR," +
+      "decision VARCHAR," +
       "reason VARCHAR," +
+      "reasons VARCHAR," +
+      "policy_version VARCHAR," +
+      "triggered_controls VARCHAR," +
       "opa_request VARCHAR," +
       "opa_response VARCHAR," +
+      "ts VARCHAR," +
+      "PRIMARY KEY (id))";
+
+    const ddlAlerts =
+      "CREATE TABLE IF NOT EXISTS mcp_alerts(" +
+      "id INTEGER AUTO_INCREMENT," +
+      "request_id VARCHAR," +
+      "authenticated_user VARCHAR," +
+      "requester_ip VARCHAR," +
+      "tool_name VARCHAR," +
+      "reason VARCHAR," +
+      "reasons VARCHAR," +
+      "actions VARCHAR," +
+      "risk VARCHAR," +
       "ts VARCHAR," +
       "PRIMARY KEY (id))";
 
     try {
       await this.execSqlWithRetry(ddlActions);
       await this.execSqlWithRetry(ddlPolicy);
+      await this.execSqlWithRetry(ddlAlerts);
     } catch (error) {
       console.warn("Failed to ensure immuDB SQL table:", error.message);
     }
@@ -207,12 +227,17 @@ export class ImmuDBLogger {
   }
 
   async recordPolicyDecision({
+    requestId,
     authenticatedUser,
     requesterIp,
     toolName,
     targetUserId,
     allow,
+    decision,
     reason,
+    reasons,
+    policyVersion,
+    triggeredControls,
     opaRequest,
     opaResponse
   }) {
@@ -226,12 +251,17 @@ export class ImmuDBLogger {
       if (!this.useKv) return;
       const key = `mcp-policy:${Date.now()}:${crypto.randomBytes(6).toString("hex")}`;
       const value = JSON.stringify({
+        requestId,
         authenticatedUser,
         requesterIp,
         toolName,
         targetUserId,
         allow: Boolean(allow),
+        decision: decision || (allow ? "ALLOW" : "DENY"),
         reason: reason || "unknown",
+        reasons: reasons || [],
+        policyVersion: policyVersion || "v1",
+        triggeredControls: triggeredControls || [],
         opaRequest,
         opaResponse,
         timestamp
@@ -243,8 +273,8 @@ export class ImmuDBLogger {
       if (!this.useSql) return;
       const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
       const sql =
-        "INSERT INTO mcp_policy_decisions(authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_request, opa_response, ts) VALUES('" +
-        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}')`;
+        "INSERT INTO mcp_policy_decisions(request_id, authenticated_user, requester_ip, tool_name, target_user_id, allow, decision, reason, reasons, policy_version, triggered_controls, opa_request, opa_response, ts) VALUES('" +
+        `${esc(requestId)}','${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(decision || (allow ? "ALLOW" : "DENY"))}','${esc(reason)}','${esc(JSON.stringify(reasons || []))}','${esc(policyVersion || "v1")}','${esc(JSON.stringify(triggeredControls || []))}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}')`;
       await this.execSqlWithRetry(sql);
     };
 
@@ -260,5 +290,48 @@ export class ImmuDBLogger {
     };
 
     await Promise.allSettled([executeWithRetry(kvWrite), executeWithRetry(sqlInsert)]);
+  }
+
+  async recordAlert({
+    requestId,
+    authenticatedUser,
+    requesterIp,
+    toolName,
+    reason,
+    reasons,
+    actions,
+    risk
+  }) {
+    if (!this.enabled) return;
+    await this.init();
+    const timestamp = new Date().toISOString();
+
+    const kvWrite = async () => {
+      if (!this.useKv) return;
+      const key = `mcp-alert:${Date.now()}:${crypto.randomBytes(6).toString("hex")}`;
+      const value = JSON.stringify({
+        requestId,
+        authenticatedUser,
+        requesterIp,
+        toolName,
+        reason,
+        reasons: reasons || [],
+        actions: actions || [],
+        risk: risk || "high",
+        timestamp
+      });
+      await this.client.set({ key, value });
+    };
+
+    const sqlInsert = async () => {
+      if (!this.useSql) return;
+      const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
+      const sql =
+        "INSERT INTO mcp_alerts(request_id, authenticated_user, requester_ip, tool_name, reason, reasons, actions, risk, ts) VALUES('" +
+        `${esc(requestId)}','${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(reason)}','${esc(JSON.stringify(reasons || []))}','${esc(JSON.stringify(actions || []))}','${esc(risk || "high")}','${esc(timestamp)}')`;
+      await this.execSqlWithRetry(sql);
+    };
+
+    await Promise.allSettled([kvWrite(), sqlInsert()]);
   }
 }

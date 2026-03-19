@@ -174,15 +174,14 @@ async function fetchKvLogs(prefix) {
         let opaResponse = null;
 
         if (prefix === "mcp-policy:") {
-          // Policy decisions have toolName and allow instead of action
-          const allowRaw = String(value.allow || false).toLowerCase();
-          const allowNormalized = allowRaw === "true" ? "allow" : "deny";
+          const decision = String(value.decision || (value.allow ? "ALLOW" : "DENY")).toLowerCase();
           const toolName = value.toolName || "unknown";
-          action = `${allowNormalized}:${toolName}`;
+          action = `${decision}:${toolName}`;
           opaRequest = value.opaRequest;
           opaResponse = value.opaResponse;
+        } else if (prefix === "mcp-alert:") {
+          action = `alert:${value.toolName || "unknown"}`;
         } else {
-          // Regular actions
           action = value.action || "unknown";
         }
 
@@ -200,6 +199,12 @@ async function fetchKvLogs(prefix) {
           errorMessage: value.error_message || null,
           correlationId: value.correlation_id || null,
           reason: value.reason || null,
+          reasons: value.reasons || null,
+          policyVersion: value.policyVersion || null,
+          triggeredControls: value.triggeredControls || null,
+          requestId: value.requestId || null,
+          actions: value.actions || null,
+          risk: value.risk || null,
           opaRequest,
           opaResponse,
           timestamp: value.timestamp || "unknown"
@@ -247,26 +252,59 @@ async function fetchSqlLogs(tableName) {
 
   if (tableName === "mcp_policy_decisions") {
     sqlQuery =
-      "SELECT id, authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_request, opa_response, ts FROM mcp_policy_decisions ORDER BY id DESC LIMIT 100";
+      "SELECT id, request_id, authenticated_user, requester_ip, tool_name, target_user_id, allow, decision, reason, reasons, policy_version, triggered_controls, opa_request, opa_response, ts FROM mcp_policy_decisions ORDER BY id DESC LIMIT 100";
     parseRow = (row) => {
       const getId = (val) => val?.prop || val;
       const getStr = (val) => val?.prop || val || "unknown";
       const getNullableStr = (val) => (val?.prop ?? val ?? null);
       const allowRaw = getStr(row.allow);
+      const decisionRaw = getNullableStr(row.decision);
       const allowNormalized = String(allowRaw).toLowerCase() === "true" ? "allow" : "deny";
+      const decision = decisionRaw ? String(decisionRaw).toLowerCase() : allowNormalized;
       const toolName = getStr(row.tool_name);
       const reason = getStr(row.reason);
 
       return {
         source: "sql",
         id: getId(row.id),
+        requestId: getNullableStr(row.request_id),
         authenticatedUser: getStr(row.authenticated_user),
         requesterIp: getStr(row.requester_ip),
         targetUserId: getStr(row.target_user_id),
-        action: `${allowNormalized}:${toolName}`,
+        action: `${decision}:${toolName}`,
         reason,
+        reasons: getNullableStr(row.reasons),
+        policyVersion: getNullableStr(row.policy_version),
+        triggeredControls: getNullableStr(row.triggered_controls),
         opaRequest: getNullableStr(row.opa_request),
         opaResponse: getNullableStr(row.opa_response),
+        timestamp: getStr(row.ts)
+      };
+    };
+  }
+
+
+
+  if (tableName === "mcp_alerts") {
+    sqlQuery =
+      "SELECT id, request_id, authenticated_user, requester_ip, tool_name, reason, reasons, actions, risk, ts FROM mcp_alerts ORDER BY id DESC LIMIT 100";
+    parseRow = (row) => {
+      const getId = (val) => val?.prop || val;
+      const getStr = (val) => val?.prop || val || "unknown";
+      const getNullableStr = (val) => (val?.prop ?? val ?? null);
+
+      return {
+        source: "sql",
+        id: getId(row.id),
+        requestId: getNullableStr(row.request_id),
+        authenticatedUser: getStr(row.authenticated_user),
+        requesterIp: getStr(row.requester_ip),
+        targetUserId: "security",
+        action: `alert:${getStr(row.tool_name)}`,
+        reason: getStr(row.reason),
+        reasons: getNullableStr(row.reasons),
+        actions: getNullableStr(row.actions),
+        risk: getNullableStr(row.risk),
         timestamp: getStr(row.ts)
       };
     };

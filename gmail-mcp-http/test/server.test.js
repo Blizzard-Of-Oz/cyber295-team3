@@ -30,7 +30,7 @@ function makeRequest(body = {}) {
   };
 }
 
-test('buildOpaInput preserves top-level context and enriches UC26 urgency signals', () => {
+test('buildOpaInput preserves top-level context and enriches UC26 urgency signals', async () => {
   const req = makeRequest({
     name: 'send_email',
     arguments: {
@@ -45,7 +45,7 @@ test('buildOpaInput preserves top-level context and enriches UC26 urgency signal
     }
   });
 
-  const input = buildOpaInput(req, 'send_email', req.body.arguments);
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
 
   assert.equal(input.tool.name, 'send_email');
   assert.ok(input.context, 'expected top-level context to be present');
@@ -78,7 +78,7 @@ test('extractUrlsFromText finds URLs across send_email content without duplicate
   ]);
 });
 
-test('buildOpaInput enriches top-level context with URL analysis for UC28', () => {
+test('buildOpaInput enriches top-level context with URL analysis for UC28', async () => {
   const req = makeRequest({
     name: 'send_email',
     arguments: {
@@ -89,7 +89,7 @@ test('buildOpaInput enriches top-level context with URL analysis for UC28', () =
     context: {}
   });
 
-  const input = buildOpaInput(req, 'send_email', req.body.arguments);
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
 
   assert.equal(input.context.urls.length, 1);
   assert.equal(
@@ -122,7 +122,7 @@ test('analyzeUrl flags suspicious C2 and exfiltration domain keywords', () => {
   assert.equal(analyzed.suspicious_hostname_pattern, true);
 });
 
-test('buildOpaInput sets dns_tunneling_detected for suspicious exfil domains', () => {
+test('buildOpaInput sets dns_tunneling_detected for suspicious exfil domains', async () => {
   const req = makeRequest({
     name: 'send_email',
     arguments: {
@@ -132,7 +132,7 @@ test('buildOpaInput sets dns_tunneling_detected for suspicious exfil domains', (
     }
   });
 
-  const input = buildOpaInput(req, 'send_email', req.body.arguments);
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
 
   assert.equal(input.context.urls.length, 1);
   assert.equal(input.context.urls[0].suspicious_domain_pattern, true);
@@ -401,9 +401,12 @@ test('wrapper returns policy denial for UC28 suspicious C2 domain case', async (
 });
 
 test('gmail rego policy includes UC28 DNS tunneling deny rules and preserves UC26 rule', () => {
-  const rego = fs.readFileSync(path.resolve(__dirname, '../../opa-policies/gmail.rego'), 'utf8');
+  const newPath = path.resolve(__dirname, '../../opa_policies/gmail.rego');
+  const legacyPath = path.resolve(__dirname, '../../opa-policies/gmail.rego');
+  const regoPath = fs.existsSync(newPath) ? newPath : legacyPath;
+  const rego = fs.readFileSync(regoPath, 'utf8');
 
-  assert.match(rego, /input\.context\.urgency_manipulation == true/);
+  assert.match(rego, /send_email_urgency_manipulation_block|urgency_exploitation/);
   assert.match(rego, /suspicious_query_payload/);
   assert.match(rego, /suspicious_domain_pattern/);
   assert.match(rego, /suspicious_hostname_pattern/);

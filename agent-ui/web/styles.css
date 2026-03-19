@@ -58,6 +58,59 @@ textarea {
   resize: vertical;
 }
 
+input[type="file"] {
+  width: 100%;
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+
+.hint {
+  margin: 0 0 10px;
+  color: #5b6270;
+  font-size: 13px;
+}
+
+#attachmentList {
+  background: #f8fafc;
+  color: #1e293b;
+  border: 1px solid #d8dee9;
+}
+
+.attachment-list {
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attachment-row {
+  background: #ffffff;
+  border: 1px solid #d8dee9;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.attachment-row-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.attachment-row label {
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.attachment-row input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  padding: 8px;
+}
+
 .actions {
   display: flex;
   align-items: center;
@@ -109,6 +162,12 @@ button:disabled {
   font-weight: 600;
   font-size: 13px;
   color: #0f172a;
+  word-break: break-word;
+}
+
+.user-email {
+  font-size: 12px;
+  color: #475569;
   word-break: break-word;
 }
 

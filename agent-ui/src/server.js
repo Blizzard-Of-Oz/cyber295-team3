@@ -4,6 +4,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import session from "express-session";
 import crypto from "crypto";
+import fs from "fs/promises";
+import os from "os";
 import * as msal from "@azure/msal-node";
 import { McpClientManager } from "./mcp-client.js";
 import { createAgent } from "./agent.js";
@@ -12,6 +14,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 5000;
 const DEBUG = process.env.DEBUG === "true";
+const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachments");
+const AGENT_UPLOAD_TEMP_DIR = process.env.AGENT_UPLOAD_TEMP_DIR || DEFAULT_ATTACHMENT_SANDBOX_ROOT;
+const ATTACHMENT_SANDBOX_SOURCE = process.env.AGENT_UPLOAD_TEMP_DIR
+  ? "AGENT_UPLOAD_TEMP_DIR"
+  : "default";
 
 const msalConfig = {
   auth: {
@@ -53,7 +60,7 @@ function debugLog(message, meta) {
 const mcpClientManager = new McpClientManager();
 const agent = createAgent({ mcpClientManager });
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: process.env.REQUEST_JSON_LIMIT || "15mb" }));
 app.use(express.static(path.join(__dirname, "..", "web")));
 
 app.set("trust proxy", true);
@@ -115,6 +122,82 @@ function getClientIp(req) {
   }
 
   return req.socket?.remoteAddress || req.ip || "unknown";
+}
+
+function sanitizeAttachmentName(name) {
+  if (typeof name !== "string") return "attachment.bin";
+  const normalized = path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_");
+  return normalized || "attachment.bin";
+}
+
+function createUniqueFilename(baseName, usedNames, fallbackIndex) {
+  const initial = sanitizeAttachmentName(baseName || `attachment-${fallbackIndex}.bin`);
+  if (!usedNames.has(initial)) {
+    usedNames.add(initial);
+    return initial;
+  }
+
+  const extension = path.extname(initial);
+  const stem = extension ? initial.slice(0, -extension.length) : initial;
+  let counter = 1;
+  while (true) {
+    const candidate = `${stem}-${counter}${extension}`;
+    if (!usedNames.has(candidate)) {
+      usedNames.add(candidate);
+      return candidate;
+    }
+    counter += 1;
+  }
+}
+
+async function materializeRequestAttachments(req) {
+  const payload = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+  const tempRoot = AGENT_UPLOAD_TEMP_DIR;
+  await fs.mkdir(tempRoot, { recursive: true, mode: 0o700 });
+  await fs.chmod(tempRoot, 0o700).catch(() => {});
+
+  // Create a per-request random directory with restrictive permissions.
+  const requestDir = await fs.mkdtemp(path.join(tempRoot, "req-"));
+  await fs.chmod(requestDir, 0o700).catch(() => {});
+
+  if (payload.length === 0) {
+    return { paths: [], metadata: [], requestDir, cleanup: async () => {
+      await fs.rm(requestDir, { recursive: true, force: true });
+    } };
+  }
+
+  const paths = [];
+  const metadata = [];
+  const usedNames = new Set();
+  for (let i = 0; i < payload.length; i += 1) {
+    const entry = payload[i] || {};
+    const base64 = typeof entry.contentBase64 === "string" ? entry.contentBase64 : "";
+    if (!base64) continue;
+    const fileBytes = Buffer.from(base64, "base64");
+    const filename = createUniqueFilename(entry.name, usedNames, i + 1);
+    const filePath = path.join(requestDir, filename);
+    await fs.writeFile(filePath, fileBytes, { mode: 0o600 });
+    paths.push(filePath);
+
+    const displayName = typeof entry.displayName === "string" && entry.displayName.trim()
+      ? entry.displayName.trim()
+      : filename;
+    const displaySize = Number(entry.displaySizeBytes);
+    metadata.push({
+      path: filePath,
+      displayName,
+      displaySizeBytes: Number.isFinite(displaySize) && displaySize >= 0 ? displaySize : fileBytes.length
+    });
+  }
+
+  return {
+    paths,
+    metadata,
+    requestDir,
+    cleanup: async () => {
+      await fs.rm(requestDir, { recursive: true, force: true });
+    }
+  };
 }
 
 function isAuthenticated(req, res, next) {
@@ -220,31 +303,64 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
     return res.status(400).json({ error: "requirement is required" });
   }
 
+  let uploaded = { paths: [], metadata: [], cleanup: async () => {} };
+
   try {
+    uploaded = await materializeRequestAttachments(req);
     debugLog("Agent run started", { requirementLength: requirement.length });
     const requesterIp = getClientIp(req);
     const authenticatedUser =
       req.session?.account?.username || req.session?.account?.name || "unknown";
     const entraToken = req.session?.accessToken || "";
+
+    const extraAttachmentPaths = Array.isArray(req.body?.attachmentPaths)
+      ? req.body.attachmentPaths.filter((v) => typeof v === "string" && v.trim().length > 0)
+      : [];
+
+    const availableAttachmentPaths = [...uploaded.paths, ...extraAttachmentPaths];
+    const availableAttachmentMetadata = [
+      ...uploaded.metadata,
+      ...extraAttachmentPaths.map((filePath) => ({
+        path: filePath,
+        displayName: path.basename(filePath),
+        displaySizeBytes: 0
+      }))
+    ];
+
     const result = await agent.run(requirement, {
       authenticatedUser,
       entraToken,
-      requesterIp
+      requesterIp,
+      availableAttachmentPaths,
+      availableAttachmentMetadata,
+      generatedAttachmentDir: uploaded.requestDir
     });
     debugLog("Agent run completed", {
-      toolCalls: result?.toolCalls?.length || 0
+      toolCalls: result?.toolCalls?.length || 0,
+      uploadedAttachmentCount: uploaded.paths.length,
+      availableAttachmentCount: availableAttachmentPaths.length
     });
-    return res.json(result);
+    return res.json({
+      ...result,
+      attachmentPathsUsed: availableAttachmentPaths
+    });
   } catch (error) {
     debugLog("Agent run failed", { error: error?.message || error });
     return res.status(500).json({
       error: error?.message || "Unknown error"
+    });
+  } finally {
+    await uploaded.cleanup().catch((cleanupError) => {
+      debugLog("Attachment temp cleanup failed", { error: cleanupError?.message || cleanupError });
     });
   }
 });
 
 app.listen(port, () => {
   console.log(`Agent UI server running on http://localhost:${port}`);
+  console.log(
+    `[agent-ui] Attachment sandbox root: ${AGENT_UPLOAD_TEMP_DIR} (source=${ATTACHMENT_SANDBOX_SOURCE})`
+  );
   if (DEBUG) {
     console.log("[agent-ui][debug] Debug logging enabled");
   }

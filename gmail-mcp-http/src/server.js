@@ -3,11 +3,19 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import * as tar from "tar";
+import yauzl from "yauzl";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
+import { createDemoRouter } from "./demo.js";
+import { DemoRequestIdGenerator, AccountLockManager } from "./demo-utils.js";
+import { RateLimiter, parseRateLimitConfig } from "./rate-limiter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
 const port = process.env.MCP_HTTP_PORT || 5001;
 const DEBUG = process.env.DEBUG === "true";
 const OPA_ENABLED = process.env.OPA_ENABLED !== "false";
@@ -15,12 +23,21 @@ const OPA_DECISION_URL =
   process.env.OPA_DECISION_URL || "http://localhost:8181/v1/data/gmail/decision";
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
-const URGENCY_PATTERNS = [
-  { keyword: "URGENT", regex: /\burgent\b/i, score: 3 },
-  { keyword: "IMMEDIATELY", regex: /\bimmediately\b/i, score: 2 },
-  { keyword: "DO NOT DELAY", regex: /\bdo not delay\b/i, score: 2 },
-  { keyword: "CEO DEMANDS", regex: /\bceo demands?\b/i, score: 2 },
-  { keyword: "NOW", regex: /\bnow\b/i, score: 1 }
+const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
+const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachments");
+const ATTACHMENT_SANDBOX_ROOT = path.resolve(
+  process.env.ATTACHMENT_SANDBOX_ROOT || DEFAULT_ATTACHMENT_SANDBOX_ROOT
+);
+const ATTACHMENT_SANDBOX_SOURCE = process.env.ATTACHMENT_SANDBOX_ROOT
+      ? "ATTACHMENT_SANDBOX_ROOT"
+    : "default";
+const SENSITIVE_HEADER_NAMES = [
+  "authorization",
+  "x-entra-token",
+  "cookie",
+  "set-cookie",
+  "proxy-authorization",
+  "x-api-key"
 ];
 const URL_REGEX = /\bhttps?:\/\/[^\s<>"'`]+/gi;
 const BASE64ISH_REGEX = /^(?:[A-Za-z0-9+/_-]{12,}={0,2})$/;
@@ -42,6 +59,15 @@ const SUSPICIOUS_DOMAIN_KEYWORDS = [
   "collector"
 ];
 
+// Demo utilities (loaded only if demo routes are enabled)
+let demoRequestIdGenerator = null;
+let accountLockManager = null;
+
+if (ENABLE_DEMO_ROUTES) {
+  demoRequestIdGenerator = new DemoRequestIdGenerator();
+  accountLockManager = new AccountLockManager();
+}
+
 function debugLog(message, meta) {
   if (!DEBUG) return;
   if (meta !== undefined) {
@@ -50,6 +76,8 @@ function debugLog(message, meta) {
     console.log(`[gmail-mcp-http][debug] ${message}`);
   }
 }
+
+app.use(express.json({ limit: "1mb" }));
 
 function resolveDefaultMcpCommand() {
   const localServerPath = path.resolve(
@@ -148,25 +176,36 @@ function getAuthenticatedUser(req) {
   return "unknown";
 }
 
-function collectOpaHeaders(req) {
-  const allowedHeaders = new Set([
-    "authorization",
-    "user-agent",
-    "x-entra-token",
-    "x-authenticated-user",
-    "x-user-identity",
-    "x-user-ip",
-    "x-forwarded-for",
-    "x-real-ip"
-  ]);
+function collectRequestHeaders(req) {
   const headers = {};
   for (const [key, value] of Object.entries(req.headers || {})) {
     const normalizedKey = String(key).toLowerCase();
-    if (allowedHeaders.has(normalizedKey) || normalizedKey.startsWith("x-")) {
-      headers[normalizedKey] = value;
-    }
+    headers[normalizedKey] = value;
   }
   return headers;
+}
+
+function buildHttpRequestSnapshot(req) {
+  return {
+    method: req.method,
+    path: req.path,
+    original_url: req.originalUrl,
+    protocol: req.protocol,
+    http_version: req.httpVersion,
+    host: req.get?.("host") || req.headers?.host || null,
+    headers: collectRequestHeaders(req),
+    query: req.query || {},
+    params: req.params || {},
+    body: req.body || null
+  };
+}
+
+function redactHeaders(headers = {}) {
+  const redacted = { ...headers };
+  for (const headerName of SENSITIVE_HEADER_NAMES) {
+    if (redacted[headerName]) redacted[headerName] = "[redacted]";
+  }
+  return redacted;
 }
 
 function getCorrelationId(req) {
@@ -183,66 +222,36 @@ function truncateText(value, maxLength = 500) {
   return `${value.slice(0, maxLength)}...`;
 }
 
-function extractToolError(result) {
-  if (!result || typeof result !== "object") return null;
-  if (result.isError === true) {
-    return {
-      code: result.code || "tool_error",
-      message: result.message || "Tool reported an error"
-    };
-  }
-  const content = Array.isArray(result.content) ? result.content : [];
-  for (const entry of content) {
-    const text = typeof entry?.text === "string" ? entry.text.trim() : "";
-    if (!text) continue;
-    if (/^(error|failed)\b[:\s-]/i.test(text)) {
-      return {
-        code: "tool_result_error",
-        message: text
-      };
-    }
-  }
-  return null;
-}
-
-function normalizeRecipients(value) {
-  if (Array.isArray(value)) {
-    return value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
-  }
-  if (typeof value === "string" && value.trim()) {
-    return [value.trim()];
+function normalizeEmailList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((v) => typeof v === "string" && v.includes("@"));
+  if (typeof value === "string") {
+    return value
+      .split(/[\s,;]+/)
+      .map((v) => v.trim())
+      .filter((v) => v.includes("@"));
   }
   return [];
 }
 
-function getContentText(args = {}, providedContext = {}) {
-  if (typeof providedContext.content_text === "string" && providedContext.content_text.trim()) {
-    return providedContext.content_text;
-  }
-  const subject = typeof args.subject === "string" ? args.subject : "";
-  const body = typeof args.body === "string" ? args.body : "";
-  const combined = [subject, body].filter(Boolean).join("\n");
-  return combined ? `${combined}\n` : "";
+function unique(array) {
+  return [...new Set(array)];
 }
 
-function detectUrgencySignals(parts) {
-  const haystack = parts.filter((part) => typeof part === "string" && part.trim()).join("\n");
-  const matchedKeywords = [];
-  let urgencyScore = 0;
+const URGENCY_KEYWORDS = [
+  "URGENT",
+  "IMMEDIATELY",
+  "DO NOT DELAY",
+  "CEO DEMANDS",
+  "NOW"
+];
 
-  for (const pattern of URGENCY_PATTERNS) {
-    if (pattern.regex.test(haystack)) {
-      matchedKeywords.push(pattern.keyword);
-      urgencyScore += pattern.score;
-    }
-  }
-
+function detectUrgencySignals(contentText = "", userInput = "") {
+  const text = `${contentText}\n${userInput}`.toUpperCase();
+  const matched_keywords = URGENCY_KEYWORDS.filter((keyword) => text.includes(keyword));
   return {
-    urgencyManipulation: matchedKeywords.length > 0,
-    urgencySignals: {
-      matched_keywords: matchedKeywords,
-      urgency_score: urgencyScore
-    }
+    matched_keywords,
+    urgency_score: matched_keywords.length * 2
   };
 }
 
@@ -303,10 +312,8 @@ function analyzeUrl(rawUrl) {
     const parsed = new URL(rawUrl);
     const hostname = sanitizeHostnamePart(parsed.hostname.toLowerCase());
     const hostParts = hostname.split(".").filter(Boolean);
-    const domain =
-      hostParts.length >= 2 ? hostParts.slice(-2).join(".") : hostname;
-    const subdomain =
-      hostParts.length > 2 ? hostParts.slice(0, -2).join(".") : "";
+    const domain = hostParts.length >= 2 ? hostParts.slice(-2).join(".") : hostname;
+    const subdomain = hostParts.length > 2 ? hostParts.slice(0, -2).join(".") : "";
     const queryEntries = Array.from(parsed.searchParams.entries());
     const queryValues = queryEntries.map(([, value]) => value);
     const suspiciousQueryValues = queryValues.filter((value) => looksBase64ish(value));
@@ -377,73 +384,517 @@ function analyzeUrls(parts) {
   };
 }
 
-function buildPolicyContext(req, toolName, args) {
-  const requestContext = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
-  const recipients = [
-    ...normalizeRecipients(args?.to),
-    ...normalizeRecipients(args?.cc),
-    ...normalizeRecipients(args?.bcc)
-  ];
-  const contentText = getContentText(args, requestContext);
-  const userInput =
-    typeof requestContext.userInput === "string"
-      ? requestContext.userInput
-      : typeof requestContext.user_input === "string"
-        ? requestContext.user_input
-        : null;
+function resolveCanonicalPathIfExists(targetPath) {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch (_error) {
+    return targetPath;
+  }
+}
 
-  const baseContext = {
-    recipient_count:
-      typeof requestContext.recipient_count === "number" ? requestContext.recipient_count : recipients.length,
-    recipients: Array.isArray(requestContext.recipients) ? requestContext.recipients : recipients,
-    content_text: contentText,
-    user_input: userInput,
-    attachment_bytes:
-      typeof requestContext.attachment_bytes === "number" ? requestContext.attachment_bytes : 0,
-    attachment_name:
-      typeof requestContext.attachment_name === "string" ? requestContext.attachment_name : null,
-    data_classification:
-      typeof requestContext.data_classification === "string" ? requestContext.data_classification : "none",
-    record_count: typeof requestContext.record_count === "number" ? requestContext.record_count : 0
-  };
+function getAttachmentSandboxRoots() {
+  const lexicalRoot = ATTACHMENT_SANDBOX_ROOT;
+  const canonicalRoot = resolveCanonicalPathIfExists(ATTACHMENT_SANDBOX_ROOT);
+  return { lexicalRoot, canonicalRoot };
+}
 
-  if (toolName !== "send_email") {
-    return baseContext;
+function isPathWithinDirectory(targetPath, directoryPath) {
+  const relative = path.relative(directoryPath, targetPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function validateAttachmentPath(filePath) {
+  const normalized = typeof filePath === "string" ? filePath.trim() : "";
+  if (!normalized) {
+    return { allowed: false, reason: "empty_path" };
   }
 
-  const urgency = detectUrgencySignals([
-    requestContext.userInput,
-    requestContext.user_input,
-    baseContext.user_input,
-    baseContext.content_text,
-    args?.subject,
-    args?.body
-  ]);
-  const urlAnalysis = analyzeUrls([
-    requestContext.userInput,
-    requestContext.user_input,
-    baseContext.user_input,
-    baseContext.content_text,
-    args?.subject,
-    args?.body
-  ]);
+  const { lexicalRoot, canonicalRoot } = getAttachmentSandboxRoots();
+  const resolvedPath = path.resolve(normalized);
+  const insideLexicalSandbox = isPathWithinDirectory(resolvedPath, lexicalRoot);
+  const insideCanonicalSandbox = isPathWithinDirectory(resolvedPath, canonicalRoot);
+  if (!insideLexicalSandbox && !insideCanonicalSandbox) {
+    return {
+      allowed: false,
+      reason: "outside_sandbox",
+      inputPath: normalized,
+      resolvedPath
+    };
+  }
+
+  try {
+    const realPath = fs.realpathSync(resolvedPath);
+    const insideRealLexicalSandbox = isPathWithinDirectory(realPath, lexicalRoot);
+    const insideRealCanonicalSandbox = isPathWithinDirectory(realPath, canonicalRoot);
+    if (!insideRealLexicalSandbox && !insideRealCanonicalSandbox) {
+      return {
+        allowed: false,
+        reason: "outside_sandbox_symlink",
+        inputPath: normalized,
+        resolvedPath: realPath
+      };
+    }
+  } catch (_error) {
+    // If the file does not exist yet, keep the lexical path check result.
+  }
 
   return {
-    ...baseContext,
-    urgency_manipulation: urgency.urgencyManipulation,
-    urgency_signals: urgency.urgencySignals,
-    urls: urlAnalysis.urls,
-    dns_tunneling_detected: urlAnalysis.dnsTunnelingDetected,
-    dns_tunneling_signals: urlAnalysis.dnsTunnelingSignals
+    allowed: true,
+    path: resolvedPath
   };
 }
 
-function buildOpaInput(req, toolName, args) {
-  const requesterIp = getRequesterIp(req);
-  const authenticatedUser = getAuthenticatedUser(req);
-  const headers = collectOpaHeaders(req);
+function enforceAttachmentSandbox(paths = []) {
+  const allowedPaths = [];
+  const rejectedPaths = [];
+
+  for (const filePath of paths) {
+    const validation = validateAttachmentPath(filePath);
+    if (validation.allowed) {
+      allowedPaths.push(validation.path);
+    } else {
+      rejectedPaths.push({
+        path: typeof filePath === "string" ? filePath : "",
+        reason: validation.reason,
+        resolvedPath: validation.resolvedPath || null
+      });
+    }
+  }
 
   return {
+    allowedPaths: unique(allowedPaths),
+    rejectedPaths
+  };
+}
+
+function fileExtension(value) {
+  if (typeof value !== "string" || value.trim() === "") return "";
+  const ext = path.extname(value).toLowerCase();
+  return ext.startsWith(".") ? ext.slice(1) : ext;
+}
+
+function isArchiveExtension(ext = "") {
+  return ["zip", "7z", "rar", "tar", "tgz", "gz", "bz2", "xz"].includes(lower(ext));
+}
+
+function lower(value) {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+function toFixedNumber(value, digits = 4) {
+  if (!Number.isFinite(value)) return null;
+  return Number(value.toFixed(digits));
+}
+
+function buildArchiveMetadata({ containsFileTypes = [], fileCount = 0, passwordProtected = false, compressionRatio = null } = {}) {
+  return {
+    contains_file_types: unique(containsFileTypes.map((ext) => lower(ext)).filter(Boolean)).sort(),
+    file_count: Number.isFinite(fileCount) ? fileCount : 0,
+    password_protected: Boolean(passwordProtected),
+    compression_ratio: compressionRatio
+  };
+}
+
+async function inspectZipArchive(filePath) {
+  return new Promise((resolve) => {
+    yauzl.open(filePath, { lazyEntries: true, autoClose: true }, (openError, zipFile) => {
+      if (openError || !zipFile) {
+        resolve(null);
+        return;
+      }
+
+      let fileCount = 0;
+      let totalCompressedBytes = 0;
+      let totalUncompressedBytes = 0;
+      let passwordProtected = false;
+      const containsFileTypes = [];
+
+      zipFile.on("entry", (entry) => {
+        if (!entry || /\/$/.test(entry.fileName || "")) {
+          zipFile.readEntry();
+          return;
+        }
+
+        fileCount += 1;
+        totalCompressedBytes += Number(entry.compressedSize || 0);
+        totalUncompressedBytes += Number(entry.uncompressedSize || 0);
+
+        const entryExt = fileExtension(path.basename(entry.fileName || ""));
+        if (entryExt) {
+          containsFileTypes.push(entryExt);
+        }
+
+        if ((entry.generalPurposeBitFlag & 0x1) === 0x1) {
+          passwordProtected = true;
+        }
+
+        zipFile.readEntry();
+      });
+
+      zipFile.on("end", () => {
+        const compressionRatio =
+          totalCompressedBytes > 0 ? toFixedNumber(totalUncompressedBytes / totalCompressedBytes) : null;
+        resolve(
+          buildArchiveMetadata({
+            containsFileTypes,
+            fileCount,
+            passwordProtected,
+            compressionRatio
+          })
+        );
+      });
+
+      zipFile.on("error", () => resolve(null));
+      zipFile.readEntry();
+    });
+  });
+}
+
+function isTarLikeArchive(filePath, ext) {
+  const normalizedPath = lower(filePath);
+  if (ext === "tar" || ext === "tgz") return true;
+  if (normalizedPath.endsWith(".tar.gz") || normalizedPath.endsWith(".tar.bz2") || normalizedPath.endsWith(".tar.xz")) {
+    return true;
+  }
+  return false;
+}
+
+async function inspectTarArchive(filePath, archiveSizeBytes) {
+  let fileCount = 0;
+  let totalUncompressedBytes = 0;
+  const containsFileTypes = [];
+
+  try {
+    await tar.t({
+      file: filePath,
+      onentry: (entry) => {
+        if (!entry || entry.type !== "File") return;
+        fileCount += 1;
+        totalUncompressedBytes += Number(entry.size || 0);
+        const entryExt = fileExtension(path.basename(entry.path || ""));
+        if (entryExt) {
+          containsFileTypes.push(entryExt);
+        }
+      }
+    });
+
+    const compressionRatio =
+      archiveSizeBytes > 0 ? toFixedNumber(totalUncompressedBytes / archiveSizeBytes) : null;
+    return buildArchiveMetadata({
+      containsFileTypes,
+      fileCount,
+      passwordProtected: false,
+      compressionRatio
+    });
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function inspectArchiveMetadata(filePath, ext, archiveSizeBytes) {
+  if (!filePath || !ext || !isArchiveExtension(ext)) return null;
+
+  if (ext === "zip") {
+    return inspectZipArchive(filePath);
+  }
+
+  if (isTarLikeArchive(filePath, ext)) {
+    return inspectTarArchive(filePath, archiveSizeBytes);
+  }
+
+  return null;
+}
+
+function summarizeArchiveMetadata(attachments = []) {
+  const archiveItems = attachments
+    .map((attachment) => attachment?.archive)
+    .filter((archive) => archive && typeof archive === "object");
+
+  if (archiveItems.length === 0) {
+    return {
+      contains_file_types: [],
+      file_count: 0,
+      password_protected: false,
+      compression_ratio: null
+    };
+  }
+
+  const containsFileTypes = unique(
+    archiveItems
+      .flatMap((archive) => (Array.isArray(archive.contains_file_types) ? archive.contains_file_types : []))
+      .map((ext) => lower(ext))
+      .filter(Boolean)
+  ).sort();
+
+  const fileCount = archiveItems.reduce((sum, archive) => sum + Number(archive.file_count || 0), 0);
+  const passwordProtected = archiveItems.some((archive) => Boolean(archive.password_protected));
+  const compressionRatios = archiveItems
+    .map((archive) => Number(archive.compression_ratio))
+    .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
+  const compressionRatio =
+    compressionRatios.length > 0
+      ? toFixedNumber(compressionRatios.reduce((sum, ratio) => sum + ratio, 0) / compressionRatios.length)
+      : null;
+
+  return {
+    contains_file_types: containsFileTypes,
+    file_count: fileCount,
+    password_protected: passwordProtected,
+    compression_ratio: compressionRatio
+  };
+}
+
+function normalizeAttachmentPaths(args) {
+  const raw = [];
+
+  if (Array.isArray(args?.attachments)) {
+    raw.push(...args.attachments);
+  }
+
+  if (typeof args?.attachmentPath === "string") {
+    raw.push(args.attachmentPath);
+  }
+
+  if (typeof args?.attachment_path === "string") {
+    raw.push(args.attachment_path);
+  }
+
+  return raw
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean);
+}
+
+function deriveAttachmentMetadata(args) {
+  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
+  const explicitName = args?.attachmentName || args?.attachment_name || null;
+  const paths = normalizeAttachmentPaths(args);
+
+  if (paths.length === 0) {
+    return {
+      attachmentBytes: explicitBytes,
+      attachmentName: explicitName,
+      attachmentCount: 0
+    };
+  }
+
+  let totalBytes = 0;
+  const names = [];
+
+  for (const filePath of paths) {
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        totalBytes += stat.size;
+        names.push(path.basename(filePath));
+      }
+    } catch (_error) {
+      // Ignore inaccessible attachment paths; Gmail tool will return explicit send errors.
+    }
+  }
+
+  const mergedBytes = explicitBytes > 0 ? explicitBytes : totalBytes;
+  const mergedName = explicitName || (names.length > 0 ? names.join(",") : null);
+
+  return {
+    attachmentBytes: mergedBytes,
+    attachmentName: mergedName,
+    attachmentCount: paths.length
+  };
+}
+
+function normalizeProvidedAttachments(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") {
+        const trimmed = entry.trim();
+        if (!trimmed) return null;
+        const name = path.basename(trimmed);
+        const ext = fileExtension(name);
+        return {
+          path: trimmed,
+          name,
+          file_ext: ext,
+          actual_ext: ext,
+          detected_types: ext ? [ext] : []
+        };
+      }
+
+      if (entry && typeof entry === "object") {
+        const normalized = { ...entry };
+        const name = normalized.name || normalized.filename || normalized.file_name;
+        const ext = fileExtension(name || normalized.path || "");
+
+        if (name && !normalized.name) normalized.name = name;
+        if (!normalized.file_ext && ext) normalized.file_ext = ext;
+        if (!normalized.actual_ext && normalized.file_ext) normalized.actual_ext = normalized.file_ext;
+        if (!Array.isArray(normalized.detected_types) && normalized.file_ext) {
+          normalized.detected_types = [normalized.file_ext];
+        }
+
+        return normalized;
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+async function deriveContextAttachments(req, args) {
+  const provided = normalizeProvidedAttachments(req.body?.context?.attachments);
+  const paths = unique(normalizeAttachmentPaths(args));
+
+  const derived = paths.map((filePath) => {
+    const name = path.basename(filePath);
+    const ext = fileExtension(name);
+    let sizeBytes = null;
+
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        sizeBytes = stat.size;
+      }
+    } catch (_error) {
+      // Keep attachment metadata even when file is inaccessible.
+    }
+
+    return {
+      path: filePath,
+      name,
+      size_bytes: sizeBytes,
+      file_ext: ext,
+      actual_ext: ext,
+      detected_types: ext ? [ext] : []
+    };
+  });
+
+  const explicitName = args?.attachmentName || args?.attachment_name;
+  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
+  if (derived.length === 0 && typeof explicitName === "string" && explicitName.trim()) {
+    const normalizedName = explicitName.trim();
+    const ext = fileExtension(normalizedName);
+    derived.push({
+      name: normalizedName,
+      size_bytes: explicitBytes > 0 ? explicitBytes : null,
+      file_ext: ext,
+      actual_ext: ext,
+      detected_types: ext ? [ext] : []
+    });
+  }
+
+  const merged = [...provided, ...derived];
+  const deduped = [];
+  const seen = new Set();
+
+  for (const attachment of merged) {
+    const normalizedPath = typeof attachment.path === "string" ? attachment.path.trim() : "";
+    const normalizedName = typeof attachment.name === "string" ? attachment.name.trim() : "";
+    const key = normalizedPath ? `path:${normalizedPath}` : `name:${normalizedName}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(attachment);
+  }
+
+  for (const attachment of deduped) {
+    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || ""));
+    if (!isArchiveExtension(ext)) continue;
+    if (attachment.archive && typeof attachment.archive === "object") continue;
+    if (!attachment.path || typeof attachment.path !== "string") continue;
+
+    const archive = await inspectArchiveMetadata(
+      attachment.path,
+      ext,
+      Number(attachment.size_bytes || 0)
+    );
+
+    if (archive) {
+      attachment.archive = archive;
+    }
+  }
+
+  return deduped;
+}
+
+function normalizeToolArguments(name, args) {
+  const normalized = args && typeof args === "object" ? { ...args } : {};
+  if (name === "send_email" || name === "draft_email") {
+    const attachmentPaths = normalizeAttachmentPaths(normalized);
+    const { allowedPaths, rejectedPaths } = enforceAttachmentSandbox(attachmentPaths);
+
+    if (rejectedPaths.length > 0) {
+      const error = new Error(
+        `Attachment paths must be within sandbox directory: ${ATTACHMENT_SANDBOX_ROOT}`
+      );
+      error.code = "invalid_attachment_path";
+      error.statusCode = 400;
+      error.details = {
+        sandboxRoot: ATTACHMENT_SANDBOX_ROOT,
+        rejectedPaths
+      };
+      throw error;
+    }
+
+    if (allowedPaths.length > 0) {
+      normalized.attachments = allowedPaths;
+    } else {
+      delete normalized.attachments;
+    }
+
+    delete normalized.attachmentPath;
+    delete normalized.attachment_path;
+  }
+  return normalized;
+}
+
+function extractToolError(result) {
+  if (!result || typeof result !== "object") return null;
+  if (result.isError === true) {
+    return {
+      code: result.code || "tool_error",
+      message: result.message || "Tool reported an error"
+    };
+  }
+  const content = Array.isArray(result.content) ? result.content : [];
+  for (const entry of content) {
+    const text = typeof entry?.text === "string" ? entry.text.trim() : "";
+    if (!text) continue;
+    if (/^(error|failed)\b[:\s-]/i.test(text)) {
+      return {
+        code: "tool_result_error",
+        message: text
+      };
+    }
+  }
+  return null;
+}
+
+async function buildOpaInput(req, toolName, args) {
+  const requesterIp = getRequesterIp(req);
+  const authenticatedUser = getAuthenticatedUser(req);
+  const httpRequest = buildHttpRequestSnapshot(req);
+  const headers = httpRequest.headers;
+
+  const recipients = unique([
+    ...normalizeEmailList(args?.to),
+    ...normalizeEmailList(args?.cc),
+    ...normalizeEmailList(args?.bcc),
+    ...normalizeEmailList(args?.message?.to)
+  ]);
+  const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
+  const userInput = req.body?.context?.userInput || null;
+  const urgencySignals = detectUrgencySignals(contentText, userInput || "");
+  const urlAnalysis = analyzeUrls([
+    contentText,
+    userInput,
+    req.body?.context?.content_text,
+    req.body?.context?.user_input
+  ]);
+
+  const attachmentMeta = deriveAttachmentMetadata(args);
+  const contextAttachments = await deriveContextAttachments(req, args);
+
+  const opaInput = {
     tool: {
       name: toolName,
       arguments: args
@@ -454,20 +905,43 @@ function buildOpaInput(req, toolName, args) {
       token: headers["x-entra-token"] || headers.authorization || null
     },
     request: {
-      method: req.method,
-      path: req.path,
-      headers,
-      body: req.body || null
+      ...httpRequest
     },
-    context: buildPolicyContext(req, toolName, args)
+    context: {
+      recipient_count: recipients.length,
+      recipients,
+      content_text: contentText,
+      user_input: userInput,
+      urgency_manipulation: urgencySignals.urgency_score >= 8,
+      urgency_signals: urgencySignals,
+      urls: urlAnalysis.urls,
+      dns_tunneling_detected: urlAnalysis.dnsTunnelingDetected,
+      dns_tunneling_signals: urlAnalysis.dnsTunnelingSignals,
+      attachment_bytes: Number(attachmentMeta.attachmentBytes || 0),
+      attachment_name: attachmentMeta.attachmentName,
+      attachment_count: attachmentMeta.attachmentCount,
+      attachments: contextAttachments,
+      data_classification: args?.dataClassification || args?.data_classification || "none",
+      record_count: Number(args?.recordCount || args?.record_count || 0)
+    }
   };
+
+  // For demo/testing purposes only: allow explicit timestamp in nanoseconds
+  // Only accepted when ENABLE_DEMO_ROUTES is true to prevent production misuse
+  // In production (ENABLE_DEMO_ROUTES=false), OPA always uses its own server time which is secure
+  if (ENABLE_DEMO_ROUTES && req.headers["x-demo-timestamp-ns"]) {
+    const timestampNs = Number(req.headers["x-demo-timestamp-ns"]);
+    if (!isNaN(timestampNs) && timestampNs > 0) {
+      opaInput.timestamp = timestampNs;
+    }
+  }
+
+  return opaInput;
 }
 
 function redactOpaInput(input) {
   if (!input || typeof input !== "object") return input;
-  const headers = { ...(input.request?.headers || {}) };
-  if (headers.authorization) headers.authorization = "[redacted]";
-  if (headers["x-entra-token"]) headers["x-entra-token"] = "[redacted]";
+  const headers = redactHeaders(input.request?.headers || {});
 
   return {
     ...input,
@@ -490,19 +964,30 @@ function normalizeOpaDecision(payload) {
   if (payload.result && typeof payload.result === "object") {
     const allow = Boolean(payload.result.allow);
     const reason = payload.result.reason || (allow ? "ok" : "denied");
-    return { allow, reason, raw: payload };
+    return {
+      allow,
+      reason,
+      decision: payload.result.decision || (allow ? "ALLOW" : "DENY"),
+      reasons: payload.result.reasons || [reason],
+      actions: payload.result.actions || [],
+      cooldown_seconds: payload.result.cooldown_seconds || 0,
+      risk: payload.result.risk || "medium",
+      policy_version: payload.result.policy_version || "v1",
+      triggered_controls: payload.result.triggered_controls || [],
+      raw: payload
+    };
   }
   return { allow: false, reason: "invalid_opa_response", raw: payload };
 }
 
-async function callOpaDecision(req, toolName, args) {
+async function callOpaDecision(req, toolName, args, prebuiltInput = null) {
   if (!OPA_ENABLED) {
     return { allow: true, reason: "opa_disabled", raw: null };
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPA_TIMEOUT_MS);
-  const input = buildOpaInput(req, toolName, args);
+  const input = prebuiltInput || (await buildOpaInput(req, toolName, args));
   if (DEBUG) {
     debugLog("OPA request", { url: OPA_DECISION_URL, input: redactOpaInput(input) });
   }
@@ -560,116 +1045,296 @@ const immudbLogger = new ImmuDBLogger({
   enabled: process.env.IMMUDB_ENABLED !== "false"
 });
 
+const rateLimiter = new RateLimiter(parseRateLimitConfig(process.env));
+
+// Log rate limiter configuration for debugging
+if (DEBUG) {
+  console.log("[Server] Rate Limiter Configuration:", {
+    enabled: rateLimiter.enabled,
+    redisHost: rateLimiter.redisHost,
+    redisPort: rateLimiter.redisPort,
+    redisUsername: rateLimiter.redisUsername ? "****" : undefined,
+    redisPassword: rateLimiter.redisPassword ? "****" : undefined,
+    limits: rateLimiter.limits,
+    defaultLimits: rateLimiter.defaultLimits
+  });
+}
+
 const mcpClientManager = new McpClientManager();
+let activeMcpClient = mcpClientManager;
+let activeLogger = immudbLogger;
 
 function createApp({ mcpClient = mcpClientManager, logger = immudbLogger } = {}) {
-  const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  activeMcpClient = mcpClient;
+  activeLogger = logger;
+  return app;
+}
 
-  app.get("/health", async (_req, res) => {
-    debugLog("Health check requested");
-    res.json({
-      status: "ok",
-      timestamp: new Date().toISOString()
-    });
+// Mount demo routes if enabled (default: enabled in dev environments)
+if (ENABLE_DEMO_ROUTES && accountLockManager) {
+  const demoRouter = createDemoRouter(port, accountLockManager);
+  app.use(demoRouter);
+}
+
+app.get("/health", async (_req, res) => {
+  debugLog("Health check requested");
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString()
   });
+});
 
-  app.get("/tools", async (_req, res) => {
+app.get("/tools", async (_req, res) => {
+  try {
+    debugLog("Tools endpoint requested");
+    const tools = await activeMcpClient.listTools();
+    res.json({ tools });
+  } catch (error) {
+    debugLog("Failed to list tools", { error: error?.message || error });
+    res.status(500).json({ error: error?.message || "Failed to list tools" });
+  }
+});
+
+// Rate limit status endpoint (for debugging/monitoring)
+app.get("/rate-limit/status", async (req, res) => {
+  try {
+    const scope = req.query.scope || "identity";
+    const value = req.query.value || getAuthenticatedUser(req);
+    const action = req.query.action;
+
+    if (!action) {
+      return res.status(400).json({ error: "action query parameter is required" });
+    }
+
+    const status = await rateLimiter.getStatus(scope, value, action);
+    res.json(status);
+  } catch (error) {
+    debugLog("Failed to get rate limit status", { error: error?.message || error });
+    res.status(500).json({ error: error?.message || "Failed to get rate limit status" });
+  }
+});
+
+// Reset rate limit endpoint (for testing/admin purposes)
+// Only available when ENABLE_DEMO_ROUTES is true
+if (ENABLE_DEMO_ROUTES) {
+  app.post("/rate-limit/reset", async (req, res) => {
     try {
-      debugLog("Tools endpoint requested");
-      const tools = await mcpClient.listTools();
-      res.json({ tools });
+      const { scope, value, action } = req.body || {};
+
+      if (!scope || !value || !action) {
+        return res.status(400).json({ error: "scope, value, and action are required in request body" });
+      }
+
+      await rateLimiter.resetLimit(scope, value, action);
+      res.json({ success: true, message: `Rate limit reset for ${scope}:${value}:${action}` });
     } catch (error) {
-      debugLog("Failed to list tools", { error: error?.message || error });
-      res.status(500).json({ error: error?.message || "Failed to list tools" });
+      debugLog("Failed to reset rate limit", { error: error?.message || error });
+      res.status(500).json({ error: error?.message || "Failed to reset rate limit" });
     }
   });
 
-  app.post("/call-tool", async (req, res) => {
-    const startedAt = Date.now();
-    const correlationId = getCorrelationId(req);
-    res.set("x-correlation-id", correlationId);
-    let auditStatus = "failure";
-    let auditSummary = "unknown";
-    let auditErrorCode = null;
-    let auditErrorMessage = null;
+  // Debug endpoint - check Redis connection and rate limit keys
+  app.get("/rate-limit/debug", async (req, res) => {
     try {
-      const { name, arguments: args } = req.body || {};
-      const authenticatedUser = getAuthenticatedUser(req);
-      const hasEntraToken = Boolean(req.headers["x-entra-token"]);
-      debugLog("Call tool request received", {
-        name,
-        hasArgs: Boolean(args),
-        authenticatedUser,
-        hasEntraToken
+      const debugInfo = {
+        rateLimiterEnabled: rateLimiter.enabled,
+        redisConnected: rateLimiter.client?.isOpen,
+        redisHost: rateLimiter.redisHost,
+        redisPort: rateLimiter.redisPort,
+        limits: rateLimiter.limits,
+        defaultLimits: rateLimiter.defaultLimits
+      };
+
+      // Try to connect if not already connected
+      if (!rateLimiter.client?.isOpen) {
+        try {
+          await rateLimiter.connect();
+          debugInfo.redisConnected = rateLimiter.client?.isOpen;
+        } catch (err) {
+          debugInfo.connectionError = err.message;
+        }
+      }
+
+      // Try to get keys from Redis
+      if (rateLimiter.client?.isOpen) {
+        try {
+          const keys = await rateLimiter.client.keys("ratelimit:*");
+          debugInfo.rateLimitKeys = {
+            total: keys.length,
+            sample: keys.slice(0, 10),
+            allKeys: keys
+          };
+
+          // Get values for sample keys
+          if (keys.length > 0) {
+            const sampleKeys = keys.slice(0, 5);
+            debugInfo.sampleKeyValues = {};
+            for (const key of sampleKeys) {
+              const value = await rateLimiter.client.get(key);
+              const ttl = await rateLimiter.client.ttl(key);
+              debugInfo.sampleKeyValues[key] = { value, ttl };
+            }
+          }
+        } catch (err) {
+          debugInfo.keyQueryError = err.message;
+        }
+      }
+
+      res.json(debugInfo);
+    } catch (error) {
+      debugLog("Failed to get rate limit debug info", { error: error?.message || error });
+      res.status(500).json({ error: error?.message || "Failed to get debug info" });
+    }
+  });
+}
+
+app.post("/call-tool", async (req, res) => {
+  const startedAt = Date.now();
+  const correlationId = getCorrelationId(req);
+  res.set("x-correlation-id", correlationId);
+  let auditStatus = "failure";
+  let auditSummary = "unknown";
+  let auditErrorCode = null;
+  let auditErrorMessage = null;
+  try {
+    if (DEBUG) {
+      const requestSnapshot = buildHttpRequestSnapshot(req);
+      debugLog("Incoming HTTP request", {
+        request: {
+          ...requestSnapshot,
+          headers: redactHeaders(requestSnapshot.headers)
+        }
       });
-      if (!name || !args) {
-        return res.status(400).json({ error: "name and arguments are required" });
+    }
+
+    const { name, arguments: args } = req.body || {};
+    const normalizedArgs = normalizeToolArguments(name, args);
+    const authenticatedUser = getAuthenticatedUser(req);
+    if (accountLockManager && accountLockManager.isLocked(authenticatedUser)) {
+      return res.status(403).json({ error: "Request denied by policy", reason: "account locked" });
+    }
+    const hasEntraToken = Boolean(req.headers["x-entra-token"]);
+    debugLog("Call tool request received", {
+      name,
+      hasArgs: Boolean(normalizedArgs),
+      authenticatedUser,
+      hasEntraToken
+    });
+    if (!name || !normalizedArgs) {
+      return res.status(400).json({ error: "name and arguments are required" });
+    }
+
+    // Check rate limit across multiple scopes
+    const ip = getRequesterIp(req);
+    const userAgent = req.headers["user-agent"] || "unknown";
+    
+    const rateLimitChecks = [
+      { scope: "identity", value: authenticatedUser },
+      { scope: "ip", value: ip },
+      { scope: "useragent", value: userAgent }
+    ];
+    
+    const rateLimitResult = await rateLimiter.checkMultiple(rateLimitChecks, name);
+    
+    // Set headers from the most restrictive limit (the one that was violated or has least remaining)
+    const mostRestrictive = rateLimitResult.results
+      .filter(r => r.limit) // Only consider configured limits
+      .sort((a, b) => {
+        // Prioritize violated limits
+        if (a.allowed !== b.allowed) return a.allowed ? 1 : -1;
+        // Then by remaining count
+        return (a.remaining || 0) - (b.remaining || 0);
+      })[0];
+    
+    if (mostRestrictive && mostRestrictive.limit) {
+      res.set("x-ratelimit-limit", mostRestrictive.limit);
+      res.set("x-ratelimit-remaining", mostRestrictive.remaining || 0);
+      res.set("x-ratelimit-window", mostRestrictive.window);
+      res.set("x-ratelimit-scope", mostRestrictive.scope);
+      if (mostRestrictive.resetIn) {
+        res.set("x-ratelimit-reset", mostRestrictive.resetIn);
       }
+    }
+    
+    if (!rateLimitResult.allowed) {
+      const violated = rateLimitResult.violated;
+      debugLog("Rate limit exceeded", { 
+        name, 
+        authenticatedUser, 
+        scope: violated.scope,
+        reason: violated.reason 
+      });
+      return res.status(429).json({
+        error: "Rate limit exceeded",
+        scope: violated.scope,
+        reason: violated.reason,
+        limit: violated.limit,
+        window: violated.window,
+        resetIn: violated.resetIn,
+        message: `Rate limit exceeded for scope '${violated.scope}'. Limit: ${violated.limit} requests per ${violated.window} seconds. Try again in ${violated.resetIn} seconds.`
+      });
+    }
 
-      const opaDecision = await callOpaDecision(req, name, args);
-      const requesterIp = getRequesterIp(req);
-      const targetUserId = deriveTarget(args);
+    const opaRequest = await buildOpaInput(req, name, normalizedArgs);
+    const opaDecision = await callOpaDecision(req, name, normalizedArgs, opaRequest);
+    const requesterIp = getRequesterIp(req);
+    const targetUserId = deriveTarget(normalizedArgs);
 
-      const opaRequest = buildOpaInput(req, name, args);
-      logger
-        .recordPolicyDecision({
-          authenticatedUser,
-          requesterIp,
-          toolName: name,
-          targetUserId,
-          allow: opaDecision.allow,
-          reason: opaDecision.reason,
-          opaRequest: redactOpaInput(opaRequest),
-          opaResponse: opaDecision.raw
-        })
-        .catch((error) => {
-          console.warn("Failed to write immuDB policy log:", error?.message || error);
-        });
+    const requestId = req.body?.request_id || (demoRequestIdGenerator ? demoRequestIdGenerator.nextId() : `Request-${crypto.randomBytes(6).toString("hex")}`);
+    activeLogger
+      .recordPolicyDecision({
+        requestId,
+        authenticatedUser,
+        requesterIp,
+        toolName: name,
+        targetUserId,
+        allow: opaDecision.allow,
+        reason: opaDecision.reason,
+        decision: opaDecision.decision,
+        reasons: opaDecision.reasons,
+        policyVersion: opaDecision.policy_version,
+        triggeredControls: opaDecision.triggered_controls,
+        opaRequest: redactOpaInput(opaRequest),
+        opaResponse: opaDecision.raw
+      })
+      .catch((error) => {
+        console.warn("Failed to write immuDB policy log:", error?.message || error);
+      });
 
-      if (!opaDecision.allow) {
-        debugLog("OPA denied request", { name, reason: opaDecision.reason });
-        auditStatus = "failure";
-        auditSummary = `${name} denied by policy`;
-        logger
-          .recordAction({
-            authenticatedUser,
-            requesterIp,
-            targetUserId,
-            action: name,
-            status: auditStatus,
-            durationMs: Date.now() - startedAt,
-            resultSummary: auditSummary,
-            errorCode: "policy_denied",
-            errorMessage: opaDecision.reason,
-            correlationId
-          })
-          .catch((error) => {
-            console.warn("Failed to write immuDB log:", error?.message || error);
-          });
-        return res.status(403).json({
-          error: "Request denied by policy",
-          reason: opaDecision.reason
-        });
+    if (Array.isArray(opaDecision.actions) && opaDecision.actions.includes("ALERT_SECURITY")) {
+      activeLogger.recordAlert({
+        requestId,
+        authenticatedUser,
+        requesterIp,
+        toolName: name,
+        reason: opaDecision.reason,
+        reasons: opaDecision.reasons,
+        actions: opaDecision.actions,
+        risk: opaDecision.risk
+      });
+    }
+
+    if (Array.isArray(opaDecision.actions) && opaDecision.actions.includes("LOCK_ACCOUNT")) {
+      if (accountLockManager) {
+        accountLockManager.lockAccount(authenticatedUser, { requestId, reason: opaDecision.reason });
       }
+    }
 
-      const result = await mcpClient.callTool(name, args);
-      debugLog("Tool call completed", { name });
+    if (opaDecision.decision === "THROTTLE") {
+      return res.status(429).json({
+        error: "Request throttled by policy",
+        reason: opaDecision.reason,
+        cooldown_seconds: opaDecision.cooldown_seconds,
+        message: `cooling-off period ${opaDecision.cooldown_seconds}s, confirm out-of-band`,
+        request_id: requestId
+      });
+    }
 
-      const toolError = extractToolError(result);
-      if (toolError) {
-        auditStatus = "failure";
-        auditSummary = truncateText(toolError.message, 200);
-        auditErrorCode = toolError.code;
-        auditErrorMessage = truncateText(toolError.message);
-      } else {
-        auditStatus = "success";
-        auditSummary = `${name} completed`;
-        auditErrorCode = null;
-        auditErrorMessage = null;
-      }
-
-      logger
+    if (!opaDecision.allow) {
+      debugLog("OPA denied request", { name, reason: opaDecision.reason });
+      auditStatus = "failure";
+      auditSummary = `${name} denied by policy`;
+      activeLogger
         .recordAction({
           authenticatedUser,
           requesterIp,
@@ -678,65 +1343,127 @@ function createApp({ mcpClient = mcpClientManager, logger = immudbLogger } = {})
           status: auditStatus,
           durationMs: Date.now() - startedAt,
           resultSummary: auditSummary,
-          errorCode: auditErrorCode,
-          errorMessage: auditErrorMessage,
+          errorCode: "policy_denied",
+          errorMessage: opaDecision.reason,
           correlationId
         })
         .catch((error) => {
           console.warn("Failed to write immuDB log:", error?.message || error);
         });
+      return res.status(403).json({
+        error: "Request denied by policy",
+        reason: opaDecision.reason,
+        reasons: opaDecision.reasons,
+        request_id: requestId
+      });
+    }
 
-      debugLog("Audit log scheduled", {
-        action: name,
+    const result = await activeMcpClient.callTool(name, normalizedArgs);
+    debugLog("Tool call completed", { name });
+
+    const toolError = extractToolError(result);
+    if (toolError) {
+      auditStatus = "failure";
+      auditSummary = truncateText(toolError.message, 200);
+      auditErrorCode = toolError.code;
+      auditErrorMessage = truncateText(toolError.message);
+    } else {
+      auditStatus = "success";
+      auditSummary = `${name} completed`;
+      auditErrorCode = null;
+      auditErrorMessage = null;
+    }
+
+    activeLogger
+      .recordAction({
+        authenticatedUser,
         requesterIp,
         targetUserId,
+        action: name,
         status: auditStatus,
+        durationMs: Date.now() - startedAt,
+        resultSummary: auditSummary,
+        errorCode: auditErrorCode,
+        errorMessage: auditErrorMessage,
         correlationId
+      })
+      .catch((error) => {
+        console.warn("Failed to write immuDB log:", error?.message || error);
       });
 
-      res.json({ success: true, result, correlationId });
-    } catch (error) {
-      auditErrorCode = error?.code || error?.name || "unknown";
-      auditErrorMessage = truncateText(error?.message || String(error));
-      auditSummary = "tool call failed";
-      debugLog("Tool call failed", { error: error?.message || error });
-      try {
-        const { name, arguments: args } = req.body || {};
-        const authenticatedUser = getAuthenticatedUser(req);
-        const requesterIp = getRequesterIp(req);
-        const targetUserId = deriveTarget(args);
-        logger
-          .recordAction({
-            authenticatedUser,
-            requesterIp,
-            targetUserId,
-            action: name || "unknown",
-            status: auditStatus,
-            durationMs: Date.now() - startedAt,
-            resultSummary: auditSummary,
-            errorCode: auditErrorCode,
-            errorMessage: auditErrorMessage,
-            correlationId
-          })
-          .catch((logError) => {
-            console.warn("Failed to write immuDB log:", logError?.message || logError);
-          });
-      } catch (logError) {
-        console.warn("Failed to build immuDB log payload:", logError?.message || logError);
-      }
-      res.status(500).json({ error: error?.message || "Tool call failed", correlationId });
-    }
-  });
+    debugLog("Audit log scheduled", {
+      action: name,
+      requesterIp,
+      targetUserId,
+      status: auditStatus,
+      correlationId
+    });
 
-  return app;
-}
+    res.json({ success: true, result, correlationId, request_id: requestId });
+  } catch (error) {
+    auditErrorCode = error?.code || error?.name || "unknown";
+    auditErrorMessage = truncateText(error?.message || String(error));
+    auditSummary = truncateText(error?.message || "tool call failed", 200);
+    debugLog("Tool call failed", { error: error?.message || error });
+    try {
+      const { name, arguments: args } = req.body || {};
+      const rawArgs = args && typeof args === "object" ? { ...args } : {};
+      let argsForAudit = rawArgs;
+      try {
+        // Best-effort normalization for audit target extraction only.
+        // If normalization fails (e.g., invalid attachment path), keep raw args.
+        argsForAudit = normalizeToolArguments(name, rawArgs);
+      } catch (_normalizeError) {
+        argsForAudit = rawArgs;
+      }
+      const authenticatedUser = getAuthenticatedUser(req);
+      const requesterIp = getRequesterIp(req);
+      const targetUserId = deriveTarget(argsForAudit);
+      activeLogger
+        .recordAction({
+          authenticatedUser,
+          requesterIp,
+          targetUserId,
+          action: name || "unknown",
+          status: auditStatus,
+          durationMs: Date.now() - startedAt,
+          resultSummary: auditSummary,
+          errorCode: auditErrorCode,
+          errorMessage: auditErrorMessage,
+          correlationId
+        })
+        .catch((logError) => {
+          console.warn("Failed to write immuDB log:", logError?.message || logError);
+        });
+    } catch (logError) {
+      console.warn("Failed to build immuDB log payload:", logError?.message || logError);
+    }
+    const statusCode = Number.isInteger(error?.statusCode) ? Number(error.statusCode) : 500;
+    const payload = { error: error?.message || "Tool call failed", correlationId };
+    if (error?.code) payload.code = error.code;
+    if (error?.details) payload.details = error.details;
+    res.status(statusCode).json(payload);
+  }
+});
 
 let server = null;
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isDirectRun) {
-  const app = createApp();
+const isPm2Run = Boolean(process.env.pm_id || process.env.PM2_HOME);
+const shouldStartServer = isDirectRun || isPm2Run;
+
+if (shouldStartServer) {
+  createApp();
   server = app.listen(port, () => {
     console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
+    const { canonicalRoot } = getAttachmentSandboxRoots();
+    console.log(
+      `[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT} (source=${ATTACHMENT_SANDBOX_SOURCE})`
+    );
+    if (canonicalRoot !== ATTACHMENT_SANDBOX_ROOT) {
+      console.log(
+        `[gmail-mcp-http] Attachment sandbox canonical root: ${canonicalRoot}`
+      );
+    }
     if (DEBUG) {
       console.log("[gmail-mcp-http][debug] Debug logging enabled");
     }
@@ -744,13 +1471,15 @@ if (isDirectRun) {
 
   process.on("SIGINT", async () => {
     await mcpClientManager.close();
+    await rateLimiter.close();
     server.close(() => process.exit(0));
   });
+} else if (DEBUG) {
+  console.log("[gmail-mcp-http][debug] Server startup skipped (module imported for tests)");
 }
 
 export {
   buildOpaInput,
-  buildPolicyContext,
   callOpaDecision,
   createApp,
   detectUrgencySignals,
