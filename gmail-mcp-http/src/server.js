@@ -1291,8 +1291,10 @@ app.post("/call-tool", async (req, res) => {
 
 let server = null;
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isPm2Run = Boolean(process.env.pm_id || process.env.PM2_HOME);
+const shouldStartServer = isDirectRun || isPm2Run;
 
-if (isDirectRun) {
+if (shouldStartServer) {
   createApp();
   server = app.listen(port, () => {
     console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
@@ -1315,6 +1317,8 @@ if (isDirectRun) {
     await rateLimiter.close();
     server.close(() => process.exit(0));
   });
+} else if (DEBUG) {
+  console.log("[gmail-mcp-http][debug] Server startup skipped (module imported for tests)");
 }
 
 export {
