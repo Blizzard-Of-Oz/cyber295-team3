@@ -174,33 +174,6 @@ recipient_has_clevel := object.get(ctx, "recipient_has_clevel", false)
 recalled_recently := object.get(ctx, "recalled_recently", false)
 urgency_manipulation := object.get(ctx, "urgency_manipulation", false)
 
-# Legacy pr-4-test behavior: keep a blocked-recipient deny path even after folder rename.
-legacy_blocked_recipients := {"yaoyaozong@gmail.com"}
-
-configured_blocked_recipients := blocked if {
-  configured := object.get(cfg, "blocked_recipients", [])
-  blocked := {lower(v) |
-    some v in configured
-    type_name(v) == "string"
-    trim(v, " ") != ""
-  }
-}
-
-effective_blocked_recipients := configured_blocked_recipients if {
-  count(configured_blocked_recipients) > 0
-}
-
-effective_blocked_recipients := legacy_blocked_recipients if {
-  count(configured_blocked_recipients) == 0
-}
-
-blocked_recipient[blocked] if {
-  some recipient in recipients
-  rr := lower(recipient)
-  some blocked in effective_blocked_recipients
-  rr == blocked
-}
-
 # Legacy pr-4-test behavior for runtime MCP payloads.
 send_email_urgency_manipulation_block if {
   lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
@@ -828,7 +801,6 @@ confidential_keyword_found if {
 # =========================================================
 
 triggered_controls[c] if { high_urgency_untrusted; c := "urgency_throttle_triggered" }
-triggered_controls[c] if { blocked_recipient[_]; c := "blocked_recipient_detected" }
 triggered_controls[c] if { send_email_urgency_manipulation_block; c := "send_email_urgency_manipulation_denied" }
 triggered_controls[c] if { has_prompt_injection; c := "prompt_injection_detected" }
 triggered_controls[c] if { blocked_external_recipient; c := "external_recipient_not_approved" }
@@ -871,12 +843,6 @@ triggered_controls[c] if { confidential_keyword_found; c := "confidential_keywor
 # =========================================================
 # Reasons
 # =========================================================
-
-deny_reasons[r] if {
-  blocked_recipient[blocked]
-  r := sprintf("recipient %s is blocked", [blocked])
-}
-
 deny_reasons[r] if {
   send_email_urgency_manipulation_block
   r := "urgency manipulation detected"

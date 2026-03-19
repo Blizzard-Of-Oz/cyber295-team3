@@ -1686,25 +1686,6 @@ test_deny_uc39_polyglot_file if {
 }
 
 # ========== REGRESSION — RESTORED PR-4-TEST BEHAVIOR ==========
-test_deny_restored_pr4_blocked_recipient if {
-  test_input := {
-    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
-    "context": {
-      "recipient_count": 1,
-      "recipients": ["yaoyaozong@gmail.com"],
-      "content_text": "Regular email",
-      "user_input": "Send",
-      "attachment_bytes": 0,
-      "data_classification": "none",
-      "record_count": 0,
-    }
-  }
-
-  result := data.gmail.decision with input as test_input
-  result.decision == "DENY"
-  "blocked_recipient_detected" in result.triggered_controls
-}
-
 test_deny_restored_pr4_send_email_urgency_manipulation if {
   test_input := {
     "tool": {
