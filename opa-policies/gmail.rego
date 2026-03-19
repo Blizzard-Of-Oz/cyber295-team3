@@ -57,6 +57,49 @@ deny[reason] if {
 	reason := "urgency manipulation detected"
 }
 
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "suspicious_query_payload", false) == true
+	reason := "suspicious encoded url payload detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	object.get(input.context, "dns_tunneling_detected", false) == true
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "suspicious_domain_pattern", false) == true
+	reason := "dns tunneling / suspicious c2 domain detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "suspicious_hostname_pattern", false) == true
+	reason := "suspicious exfiltration domain detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "looks_base64_subdomain", false) == true
+	reason := "dns tunneling / suspicious encoded url detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "high_entropy_subdomain", false) == true
+	reason := "high-entropy subdomain detected"
+}
+
+deny[reason] if {
+	input.tool.name == "send_email"
+	some url in object.get(input.context, "urls", [])
+	object.get(url, "long_query_string", false) == true
+	reason := "dns tunneling / suspicious encoded url detected"
+}
+
 allow if {
 	count(deny) == 0
 }
@@ -66,8 +109,10 @@ reason := "ok" if {
 }
 
 reason := r if {
-	not allow
-	deny[r]
+        not allow
+        reasons := sort([d | deny[d]])
+        count(reasons) > 0
+        r := reasons[0]
 }
 
 decision := {

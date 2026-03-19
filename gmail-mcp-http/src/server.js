@@ -22,6 +22,25 @@ const URGENCY_PATTERNS = [
   { keyword: "CEO DEMANDS", regex: /\bceo demands?\b/i, score: 2 },
   { keyword: "NOW", regex: /\bnow\b/i, score: 1 }
 ];
+const URL_REGEX = /\bhttps?:\/\/[^\s<>"'`]+/gi;
+const BASE64ISH_REGEX = /^(?:[A-Za-z0-9+/_-]{12,}={0,2})$/;
+const LONG_QUERY_STRING_THRESHOLD = 80;
+const SUSPICIOUS_QUERY_VALUE_LENGTH = 24;
+const HIGH_ENTROPY_SUBDOMAIN_THRESHOLD = 3.3;
+const HIGH_ENTROPY_SUBDOMAIN_LENGTH = 12;
+const SUSPICIOUS_DOMAIN_KEYWORDS = [
+  "exfil",
+  "c2",
+  "command-and-control",
+  "beacon",
+  "payload",
+  "tunnel",
+  "dns",
+  "covert",
+  "steal",
+  "drop",
+  "collector"
+];
 
 function debugLog(message, meta) {
   if (!DEBUG) return;
@@ -227,6 +246,137 @@ function detectUrgencySignals(parts) {
   };
 }
 
+function extractUrlsFromText(...parts) {
+  const urls = [];
+  const seen = new Set();
+
+  for (const part of parts) {
+    if (typeof part !== "string" || !part.trim()) continue;
+    for (const match of part.matchAll(URL_REGEX)) {
+      const url = match[0];
+      if (seen.has(url)) continue;
+      seen.add(url);
+      urls.push(url);
+    }
+  }
+
+  return urls;
+}
+
+function sanitizeHostnamePart(part) {
+  if (typeof part !== "string") return "";
+  return part.trim().replace(/^\.+|\.+$/g, "");
+}
+
+function shannonEntropy(value) {
+  if (typeof value !== "string" || value.length === 0) return 0;
+  const counts = new Map();
+  for (const char of value) {
+    counts.set(char, (counts.get(char) || 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return Number(entropy.toFixed(3));
+}
+
+function looksBase64ish(value, minLength = SUSPICIOUS_QUERY_VALUE_LENGTH) {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim();
+  if (normalized.length < minLength) return false;
+  return BASE64ISH_REGEX.test(normalized);
+}
+
+function collectSuspiciousKeywords(...parts) {
+  const haystack = parts
+    .filter((part) => typeof part === "string" && part.trim())
+    .map((part) => part.toLowerCase())
+    .join("\n");
+
+  return SUSPICIOUS_DOMAIN_KEYWORDS.filter((keyword) => haystack.includes(keyword));
+}
+
+function analyzeUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = sanitizeHostnamePart(parsed.hostname.toLowerCase());
+    const hostParts = hostname.split(".").filter(Boolean);
+    const domain =
+      hostParts.length >= 2 ? hostParts.slice(-2).join(".") : hostname;
+    const subdomain =
+      hostParts.length > 2 ? hostParts.slice(0, -2).join(".") : "";
+    const queryEntries = Array.from(parsed.searchParams.entries());
+    const queryValues = queryEntries.map(([, value]) => value);
+    const suspiciousQueryValues = queryValues.filter((value) => looksBase64ish(value));
+    const queryString = parsed.search.startsWith("?") ? parsed.search.slice(1) : parsed.search;
+    const subdomainEntropy = shannonEntropy(subdomain);
+    const looksBase64Subdomain = looksBase64ish(subdomain, 10);
+    const highEntropySubdomain =
+      subdomain.length >= HIGH_ENTROPY_SUBDOMAIN_LENGTH &&
+      subdomainEntropy >= HIGH_ENTROPY_SUBDOMAIN_THRESHOLD;
+    const longQueryString = queryString.length >= LONG_QUERY_STRING_THRESHOLD;
+    const suspiciousQueryPayload = suspiciousQueryValues.length > 0;
+    const suspiciousDomainKeywords = collectSuspiciousKeywords(hostname, domain, rawUrl);
+    const suspiciousDomainPattern = suspiciousDomainKeywords.length > 0;
+    const suspiciousHostnamePattern = suspiciousDomainKeywords.some((keyword) => hostname.includes(keyword));
+
+    return {
+      original_url: rawUrl,
+      hostname,
+      domain,
+      subdomain,
+      query_string_length: queryString.length,
+      query_param_count: queryEntries.length,
+      query_param_keys: queryEntries.map(([key]) => key),
+      query_values_look_base64: suspiciousQueryPayload,
+      suspicious_query_value_lengths: suspiciousQueryValues.map((value) => value.length),
+      subdomain_length: subdomain.length,
+      subdomain_entropy: subdomainEntropy,
+      suspicious_domain_keywords: suspiciousDomainKeywords,
+      suspicious_domain_pattern: suspiciousDomainPattern,
+      suspicious_hostname_pattern: suspiciousHostnamePattern,
+      looks_base64_subdomain: looksBase64Subdomain,
+      high_entropy_subdomain: highEntropySubdomain,
+      long_query_string: longQueryString,
+      suspicious_query_payload: suspiciousQueryPayload
+    };
+  } catch {
+    return null;
+  }
+}
+
+function analyzeUrls(parts) {
+  const analyzed = extractUrlsFromText(...parts).map(analyzeUrl).filter(Boolean);
+  const flagged = analyzed.filter(
+    (entry) =>
+      entry.looks_base64_subdomain ||
+      entry.high_entropy_subdomain ||
+      entry.suspicious_domain_pattern ||
+      entry.suspicious_hostname_pattern ||
+      entry.long_query_string ||
+      entry.suspicious_query_payload
+  );
+
+  return {
+    urls: analyzed,
+    dnsTunnelingDetected: flagged.length > 0,
+    dnsTunnelingSignals: {
+      url_count: analyzed.length,
+      flagged_url_count: flagged.length,
+      flagged_reasons: {
+        base64_subdomain_count: flagged.filter((entry) => entry.looks_base64_subdomain).length,
+        high_entropy_subdomain_count: flagged.filter((entry) => entry.high_entropy_subdomain).length,
+        suspicious_domain_pattern_count: flagged.filter((entry) => entry.suspicious_domain_pattern).length,
+        suspicious_hostname_pattern_count: flagged.filter((entry) => entry.suspicious_hostname_pattern).length,
+        long_query_string_count: flagged.filter((entry) => entry.long_query_string).length,
+        suspicious_query_payload_count: flagged.filter((entry) => entry.suspicious_query_payload).length
+      }
+    }
+  };
+}
+
 function buildPolicyContext(req, toolName, args) {
   const requestContext = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
   const recipients = [
@@ -269,11 +419,22 @@ function buildPolicyContext(req, toolName, args) {
     args?.subject,
     args?.body
   ]);
+  const urlAnalysis = analyzeUrls([
+    requestContext.userInput,
+    requestContext.user_input,
+    baseContext.user_input,
+    baseContext.content_text,
+    args?.subject,
+    args?.body
+  ]);
 
   return {
     ...baseContext,
     urgency_manipulation: urgency.urgencyManipulation,
-    urgency_signals: urgency.urgencySignals
+    urgency_signals: urgency.urgencySignals,
+    urls: urlAnalysis.urls,
+    dns_tunneling_detected: urlAnalysis.dnsTunnelingDetected,
+    dns_tunneling_signals: urlAnalysis.dnsTunnelingSignals
   };
 }
 
@@ -593,6 +754,8 @@ export {
   callOpaDecision,
   createApp,
   detectUrgencySignals,
+  extractUrlsFromText,
+  analyzeUrl,
   normalizeOpaDecision,
   redactOpaInput
 };
