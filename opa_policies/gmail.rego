@@ -887,6 +887,43 @@ deny_reasons[r] if { calendar_malicious; r := "Malicious calendar invite detecte
 deny_reasons[r] if { email_auth_failed; any_external_domain; r := "Email authentication failed (SPF/DKIM/DMARC) for external send." } # UC25
 deny_reasons[r] if { stego_detected; r := "Steganography signal indicates hidden data in image attachment." } # UC27
 deny_reasons[r] if { dns_tunneling_url; r := "URL appears to contain encoded data (DNS tunneling / high-entropy subdomain)." } # UC28
+deny_reasons[r] if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  some u in urls
+  object.get(u, "suspicious_query_payload", false)
+  r := "suspicious encoded url payload detected"
+}
+deny_reasons[r] if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  object.get(ctx, "dns_tunneling_detected", false)
+  some u in urls
+  object.get(u, "suspicious_domain_pattern", false)
+  r := "dns tunneling / suspicious c2 domain detected"
+}
+deny_reasons[r] if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  some u in urls
+  object.get(u, "suspicious_hostname_pattern", false)
+  r := "suspicious exfiltration domain detected"
+}
+deny_reasons[r] if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  some u in urls
+  object.get(u, "looks_base64_subdomain", false)
+  r := "dns tunneling / suspicious encoded url detected"
+}
+deny_reasons[r] if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  some u in urls
+  object.get(u, "high_entropy_subdomain", false)
+  r := "high-entropy subdomain detected"
+}
+deny_reasons[r] if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  some u in urls
+  object.get(u, "long_query_string", false)
+  r := "dns tunneling / suspicious encoded url detected"
+}
 deny_reasons[r] if { chunked_exfil; r := "Low-and-slow exfiltration detected by recipient frequency/volume." } # UC29
 deny_reasons[r] if { archive_exfil; r := "Archive exfiltration blocked (prohibited contents or encrypted archive to external)." } # UC30
 deny_reasons[r] if { direct_blocked_attachment; r := "Attachment blocked: file extension is prohibited by archive_policy.blocked_file_types." } # UC9
