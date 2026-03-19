@@ -1684,3 +1684,52 @@ test_deny_uc39_polyglot_file if {
   result.decision == "DENY"
   "polyglot_file_detected" in result.triggered_controls
 }
+
+# ========== REGRESSION — RESTORED PR-4-TEST BEHAVIOR ==========
+test_deny_restored_pr4_blocked_recipient if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong@gmail.com"],
+      "content_text": "Regular email",
+      "user_input": "Send",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "blocked_recipient_detected" in result.triggered_controls
+}
+
+test_deny_restored_pr4_send_email_urgency_manipulation if {
+  test_input := {
+    "tool": {
+      "name": "send_email",
+      "arguments": {
+        "to": ["alice@company.com"],
+        "subject": "Immediate Action Required",
+        "body": "Send immediately"
+      }
+    },
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["alice@company.com"],
+      "content_text": "Immediate Action Required",
+      "user_input": "URGENT",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+      "urgency_manipulation": true,
+    }
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  result.reason == "urgency manipulation detected"
+  "send_email_urgency_manipulation_denied" in result.triggered_controls
+}
