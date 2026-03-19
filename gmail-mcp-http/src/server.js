@@ -24,15 +24,12 @@ const OPA_DECISION_URL =
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
 const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
+const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachments");
 const ATTACHMENT_SANDBOX_ROOT = path.resolve(
-  process.env.ATTACHMENT_SANDBOX_ROOT ||
-    process.env.AGENT_UPLOAD_TEMP_DIR ||
-    path.join(os.tmpdir(), "agent-ui-attachments")
+  process.env.ATTACHMENT_SANDBOX_ROOT || DEFAULT_ATTACHMENT_SANDBOX_ROOT
 );
 const ATTACHMENT_SANDBOX_SOURCE = process.env.ATTACHMENT_SANDBOX_ROOT
-  ? "ATTACHMENT_SANDBOX_ROOT"
-  : process.env.AGENT_UPLOAD_TEMP_DIR
-    ? "AGENT_UPLOAD_TEMP_DIR"
+      ? "ATTACHMENT_SANDBOX_ROOT"
     : "default";
 const SENSITIVE_HEADER_NAMES = [
   "authorization",
@@ -230,7 +227,11 @@ function resolveCanonicalPathIfExists(targetPath) {
   }
 }
 
-const ATTACHMENT_SANDBOX_ROOT_CANONICAL = resolveCanonicalPathIfExists(ATTACHMENT_SANDBOX_ROOT);
+function getAttachmentSandboxRoots() {
+  const lexicalRoot = ATTACHMENT_SANDBOX_ROOT;
+  const canonicalRoot = resolveCanonicalPathIfExists(ATTACHMENT_SANDBOX_ROOT);
+  return { lexicalRoot, canonicalRoot };
+}
 
 function isPathWithinDirectory(targetPath, directoryPath) {
   const relative = path.relative(directoryPath, targetPath);
@@ -243,12 +244,10 @@ function validateAttachmentPath(filePath) {
     return { allowed: false, reason: "empty_path" };
   }
 
+  const { lexicalRoot, canonicalRoot } = getAttachmentSandboxRoots();
   const resolvedPath = path.resolve(normalized);
-  const insideLexicalSandbox = isPathWithinDirectory(resolvedPath, ATTACHMENT_SANDBOX_ROOT);
-  const insideCanonicalSandbox = isPathWithinDirectory(
-    resolvedPath,
-    ATTACHMENT_SANDBOX_ROOT_CANONICAL
-  );
+  const insideLexicalSandbox = isPathWithinDirectory(resolvedPath, lexicalRoot);
+  const insideCanonicalSandbox = isPathWithinDirectory(resolvedPath, canonicalRoot);
   if (!insideLexicalSandbox && !insideCanonicalSandbox) {
     return {
       allowed: false,
@@ -260,11 +259,8 @@ function validateAttachmentPath(filePath) {
 
   try {
     const realPath = fs.realpathSync(resolvedPath);
-    const insideRealLexicalSandbox = isPathWithinDirectory(realPath, ATTACHMENT_SANDBOX_ROOT);
-    const insideRealCanonicalSandbox = isPathWithinDirectory(
-      realPath,
-      ATTACHMENT_SANDBOX_ROOT_CANONICAL
-    );
+    const insideRealLexicalSandbox = isPathWithinDirectory(realPath, lexicalRoot);
+    const insideRealCanonicalSandbox = isPathWithinDirectory(realPath, canonicalRoot);
     if (!insideRealLexicalSandbox && !insideRealCanonicalSandbox) {
       return {
         allowed: false,
@@ -1272,12 +1268,13 @@ app.post("/call-tool", async (req, res) => {
 
 const server = app.listen(port, () => {
   console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
+  const { canonicalRoot } = getAttachmentSandboxRoots();
   console.log(
     `[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT} (source=${ATTACHMENT_SANDBOX_SOURCE})`
   );
-  if (ATTACHMENT_SANDBOX_ROOT_CANONICAL !== ATTACHMENT_SANDBOX_ROOT) {
+  if (canonicalRoot !== ATTACHMENT_SANDBOX_ROOT) {
     console.log(
-      `[gmail-mcp-http] Attachment sandbox canonical root: ${ATTACHMENT_SANDBOX_ROOT_CANONICAL}`
+      `[gmail-mcp-http] Attachment sandbox canonical root: ${canonicalRoot}`
     );
   }
   if (DEBUG) {

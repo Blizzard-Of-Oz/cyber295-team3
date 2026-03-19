@@ -174,6 +174,12 @@ recipient_has_clevel := object.get(ctx, "recipient_has_clevel", false)
 recalled_recently := object.get(ctx, "recalled_recently", false)
 urgency_manipulation := object.get(ctx, "urgency_manipulation", false)
 
+# Legacy pr-4-test behavior for runtime MCP payloads.
+send_email_urgency_manipulation_block if {
+  lower(object.get(object.get(input, "tool", {}), "name", "")) == "send_email"
+  urgency_manipulation
+}
+
 # Extract domains from recipient email addresses
 recipient_domains := {domain |
   some r in recipients
@@ -795,6 +801,7 @@ confidential_keyword_found if {
 # =========================================================
 
 triggered_controls[c] if { high_urgency_untrusted; c := "urgency_throttle_triggered" }
+triggered_controls[c] if { send_email_urgency_manipulation_block; c := "send_email_urgency_manipulation_denied" }
 triggered_controls[c] if { has_prompt_injection; c := "prompt_injection_detected" }
 triggered_controls[c] if { blocked_external_recipient; c := "external_recipient_not_approved" }
 triggered_controls[c] if { broadcast_privilege_denied; c := "broadcast_requires_privileged_role" }
@@ -836,6 +843,10 @@ triggered_controls[c] if { confidential_keyword_found; c := "confidential_keywor
 # =========================================================
 # Reasons
 # =========================================================
+deny_reasons[r] if {
+  send_email_urgency_manipulation_block
+  r := "urgency manipulation detected"
+}
 
 deny_reasons[r] if {
   has_prompt_injection

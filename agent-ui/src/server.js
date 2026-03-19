@@ -15,15 +15,10 @@ const app = express();
 const port = process.env.PORT || 5000;
 const DEBUG = process.env.DEBUG === "true";
 const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachments");
-const AGENT_UPLOAD_TEMP_DIR =
-  process.env.AGENT_UPLOAD_TEMP_DIR ||
-  process.env.ATTACHMENT_SANDBOX_ROOT ||
-  DEFAULT_ATTACHMENT_SANDBOX_ROOT;
+const AGENT_UPLOAD_TEMP_DIR = process.env.AGENT_UPLOAD_TEMP_DIR || DEFAULT_ATTACHMENT_SANDBOX_ROOT;
 const ATTACHMENT_SANDBOX_SOURCE = process.env.AGENT_UPLOAD_TEMP_DIR
   ? "AGENT_UPLOAD_TEMP_DIR"
-  : process.env.ATTACHMENT_SANDBOX_ROOT
-    ? "ATTACHMENT_SANDBOX_ROOT"
-    : "default";
+  : "default";
 
 const msalConfig = {
   auth: {
