@@ -59,6 +59,7 @@ Before starting the application components, ensure the following services are in
     AZURE_TENANT_ID=your-tenant-id
     AZURE_CLIENT_ID=your-client-id
     AZURE_CLIENT_SECRET=your-client-secret
+    AGENT_UPLOAD_TEMP_DIR=/tmp/agent-ui-attachments
     ```
   - Step 3: Install Dependencies and Start
 
@@ -87,7 +88,12 @@ Before starting the application components, ensure the following services are in
     cp .env.example .env
     ```
 
-    Modify the created `.env` file to match the local immuDB and OPA setup. 
+    Modify the created `.env` file to match the local immuDB and OPA setup.
+    Ensure these values stay identical to `agent-ui/.env`:
+
+    ```env
+    ATTACHMENT_SANDBOX_ROOT=/tmp/agent-ui-attachments
+    ```
     
     Then install dependenicies and start 
 

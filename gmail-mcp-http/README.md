@@ -51,7 +51,7 @@ MCP_ARGS=/absolute/path/to/mcp-server/gmail/dist/index.js
 MCP_HTTP_PORT=3301
 DEBUG=false
 
-# Attachment sandbox (defaults to AGENT_UPLOAD_TEMP_DIR, then /tmp/agent-ui-attachments)
+# Attachment sandbox (defaults to OS temp dir + /agent-ui-attachments)
 ATTACHMENT_SANDBOX_ROOT=/tmp/agent-ui-attachments
 
 # OPA
