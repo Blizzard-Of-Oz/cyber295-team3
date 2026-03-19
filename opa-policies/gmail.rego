@@ -109,8 +109,10 @@ reason := "ok" if {
 }
 
 reason := r if {
-	not allow
-	deny[r]
+        not allow
+        reasons := sort([d | deny[d]])
+        count(reasons) > 0
+        r := reasons[0]
 }
 
 decision := {
