@@ -19,7 +19,7 @@ function makeRequest(body = {}) {
   };
 }
 
-test('buildOpaInput preserves top-level context and enriches UC26 urgency signals', () => {
+test('buildOpaInput preserves top-level context and enriches UC26 urgency signals', async () => {
   const req = makeRequest({
     name: 'send_email',
     arguments: {
@@ -34,7 +34,7 @@ test('buildOpaInput preserves top-level context and enriches UC26 urgency signal
     }
   });
 
-  const input = buildOpaInput(req, 'send_email', req.body.arguments);
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
 
   assert.equal(input.tool.name, 'send_email');
   assert.ok(input.context, 'expected top-level context to be present');

@@ -219,6 +219,23 @@ function unique(array) {
   return [...new Set(array)];
 }
 
+const URGENCY_KEYWORDS = [
+  "URGENT",
+  "IMMEDIATELY",
+  "DO NOT DELAY",
+  "CEO DEMANDS",
+  "NOW"
+];
+
+function detectUrgencySignals(contentText = "", userInput = "") {
+  const text = `${contentText}\n${userInput}`.toUpperCase();
+  const matched_keywords = URGENCY_KEYWORDS.filter((keyword) => text.includes(keyword));
+  return {
+    matched_keywords,
+    urgency_score: matched_keywords.length * 2
+  };
+}
+
 function resolveCanonicalPathIfExists(targetPath) {
   try {
     return fs.realpathSync(targetPath);
@@ -682,9 +699,6 @@ function normalizeToolArguments(name, args) {
   return normalized;
 }
 
-// NOTE: Urgency score calculation is now handled by OPA policy, not by this application.
-// OPA uses urgency_keywords from data.json and checks both content_text and user_input.
-
 function extractToolError(result) {
   if (!result || typeof result !== "object") return null;
   if (result.isError === true) {
@@ -721,6 +735,7 @@ async function buildOpaInput(req, toolName, args) {
   ]);
   const contentText = `${args?.subject || ""}\n${args?.body || ""}\n${args?.message?.body || ""}`;
   const userInput = req.body?.context?.userInput || null;
+  const urgencySignals = detectUrgencySignals(contentText, userInput || "");
 
   const attachmentMeta = deriveAttachmentMetadata(args);
   const contextAttachments = await deriveContextAttachments(req, args);
@@ -743,6 +758,8 @@ async function buildOpaInput(req, toolName, args) {
       recipients,
       content_text: contentText,
       user_input: userInput,
+      urgency_manipulation: urgencySignals.urgency_score >= 8,
+      urgency_signals: urgencySignals,
       attachment_bytes: Number(attachmentMeta.attachmentBytes || 0),
       attachment_name: attachmentMeta.attachmentName,
       attachment_count: attachmentMeta.attachmentCount,
@@ -887,6 +904,14 @@ if (DEBUG) {
 }
 
 const mcpClientManager = new McpClientManager();
+let activeMcpClient = mcpClientManager;
+let activeLogger = immudbLogger;
+
+function createApp({ mcpClient = mcpClientManager, logger = immudbLogger } = {}) {
+  activeMcpClient = mcpClient;
+  activeLogger = logger;
+  return app;
+}
 
 // Mount demo routes if enabled (default: enabled in dev environments)
 if (ENABLE_DEMO_ROUTES && accountLockManager) {
@@ -905,7 +930,7 @@ app.get("/health", async (_req, res) => {
 app.get("/tools", async (_req, res) => {
   try {
     debugLog("Tools endpoint requested");
-    const tools = await mcpClientManager.listTools();
+    const tools = await activeMcpClient.listTools();
     res.json({ tools });
   } catch (error) {
     debugLog("Failed to list tools", { error: error?.message || error });
@@ -1099,7 +1124,7 @@ app.post("/call-tool", async (req, res) => {
     const targetUserId = deriveTarget(normalizedArgs);
 
     const requestId = req.body?.request_id || (demoRequestIdGenerator ? demoRequestIdGenerator.nextId() : `Request-${crypto.randomBytes(6).toString("hex")}`);
-    immudbLogger
+    activeLogger
       .recordPolicyDecision({
         requestId,
         authenticatedUser,
@@ -1120,7 +1145,7 @@ app.post("/call-tool", async (req, res) => {
       });
 
     if (Array.isArray(opaDecision.actions) && opaDecision.actions.includes("ALERT_SECURITY")) {
-      immudbLogger.recordAlert({
+      activeLogger.recordAlert({
         requestId,
         authenticatedUser,
         requesterIp,
@@ -1152,7 +1177,7 @@ app.post("/call-tool", async (req, res) => {
       debugLog("OPA denied request", { name, reason: opaDecision.reason });
       auditStatus = "failure";
       auditSummary = `${name} denied by policy`;
-      immudbLogger
+      activeLogger
         .recordAction({
           authenticatedUser,
           requesterIp,
@@ -1176,7 +1201,7 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const result = await mcpClientManager.callTool(name, normalizedArgs);
+    const result = await activeMcpClient.callTool(name, normalizedArgs);
     debugLog("Tool call completed", { name });
 
     const toolError = extractToolError(result);
@@ -1192,7 +1217,7 @@ app.post("/call-tool", async (req, res) => {
       auditErrorMessage = null;
     }
 
-    immudbLogger
+    activeLogger
       .recordAction({
         authenticatedUser,
         requesterIp,
@@ -1237,7 +1262,7 @@ app.post("/call-tool", async (req, res) => {
       const authenticatedUser = getAuthenticatedUser(req);
       const requesterIp = getRequesterIp(req);
       const targetUserId = deriveTarget(argsForAudit);
-      immudbLogger
+      activeLogger
         .recordAction({
           authenticatedUser,
           requesterIp,
@@ -1264,26 +1289,39 @@ app.post("/call-tool", async (req, res) => {
   }
 });
 
+let server = null;
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
-
-const server = app.listen(port, () => {
-  console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
-  const { canonicalRoot } = getAttachmentSandboxRoots();
-  console.log(
-    `[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT} (source=${ATTACHMENT_SANDBOX_SOURCE})`
-  );
-  if (canonicalRoot !== ATTACHMENT_SANDBOX_ROOT) {
+if (isDirectRun) {
+  createApp();
+  server = app.listen(port, () => {
+    console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
+    const { canonicalRoot } = getAttachmentSandboxRoots();
     console.log(
-      `[gmail-mcp-http] Attachment sandbox canonical root: ${canonicalRoot}`
+      `[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT} (source=${ATTACHMENT_SANDBOX_SOURCE})`
     );
-  }
-  if (DEBUG) {
-    console.log("[gmail-mcp-http][debug] Debug logging enabled");
-  }
-});
+    if (canonicalRoot !== ATTACHMENT_SANDBOX_ROOT) {
+      console.log(
+        `[gmail-mcp-http] Attachment sandbox canonical root: ${canonicalRoot}`
+      );
+    }
+    if (DEBUG) {
+      console.log("[gmail-mcp-http][debug] Debug logging enabled");
+    }
+  });
 
-process.on("SIGINT", async () => {
-  await mcpClientManager.close();
-  await rateLimiter.close();
-  server.close(() => process.exit(0));
-});
+  process.on("SIGINT", async () => {
+    await mcpClientManager.close();
+    await rateLimiter.close();
+    server.close(() => process.exit(0));
+  });
+}
+
+export {
+  buildOpaInput,
+  callOpaDecision,
+  createApp,
+  detectUrgencySignals,
+  normalizeOpaDecision,
+  redactOpaInput
+};
