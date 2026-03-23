@@ -324,7 +324,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     const allToolCalls = [];
     let assistantMessage = null;
     let response = null;
-    let stepsRemaining = 7;
+    let stepsRemaining = 20;
 
     while (stepsRemaining > 0) {
       throwIfAborted();
