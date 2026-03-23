@@ -7,6 +7,8 @@ import fs from "fs";
 import os from "os";
 import * as tar from "tar";
 import yauzl from "yauzl";
+import mammoth from "mammoth";
+import { PDFParse } from "pdf-parse";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ImmuDBLogger } from "./immudb-logger.js";
@@ -28,6 +30,30 @@ const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachm
 const ATTACHMENT_SANDBOX_ROOT = path.resolve(
   process.env.ATTACHMENT_SANDBOX_ROOT || DEFAULT_ATTACHMENT_SANDBOX_ROOT
 );
+const ATTACHMENT_TEXT_MAX_BYTES = process.env.ATTACHMENT_TEXT_MAX_BYTES
+  ? Number(process.env.ATTACHMENT_TEXT_MAX_BYTES)
+  : 262144;
+const ATTACHMENT_TEXT_MAX_CHARS = process.env.ATTACHMENT_TEXT_MAX_CHARS
+  ? Number(process.env.ATTACHMENT_TEXT_MAX_CHARS)
+  : 8000;
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "json",
+  "csv",
+  "log",
+  "xml",
+  "html",
+  "htm",
+  "yaml",
+  "yml",
+  "ini",
+  "cfg",
+  "conf",
+  "tsv",
+  "sql",
+  "rtf"
+]);
 const ATTACHMENT_SANDBOX_SOURCE = process.env.ATTACHMENT_SANDBOX_ROOT
       ? "ATTACHMENT_SANDBOX_ROOT"
     : "default";
@@ -674,6 +700,148 @@ function summarizeArchiveMetadata(attachments = []) {
   };
 }
 
+function sanitizeExtractedText(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+}
+
+function trimExtractedText(value, maxChars = ATTACHMENT_TEXT_MAX_CHARS) {
+  if (typeof value !== "string") return "";
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}...`;
+}
+
+function looksBinaryBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return false;
+  const sampleSize = Math.min(buffer.length, 4096);
+  let suspicious = 0;
+
+  for (let i = 0; i < sampleSize; i += 1) {
+    const byte = buffer[i];
+    if (byte === 0) {
+      suspicious += 1;
+      continue;
+    }
+
+    const isPrintableAscii = byte >= 32 && byte <= 126;
+    const isWhitespace = byte === 9 || byte === 10 || byte === 13;
+    const isExtendedLatin = byte >= 160;
+    if (!isPrintableAscii && !isWhitespace && !isExtendedLatin) {
+      suspicious += 1;
+    }
+  }
+
+  return suspicious / sampleSize > 0.3;
+}
+
+function extractPrintableStrings(buffer, minLength = 4) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return "";
+  const strings = [];
+  let current = "";
+
+  for (const byte of buffer) {
+    const isPrintableAscii = byte >= 32 && byte <= 126;
+    const isWhitespace = byte === 9 || byte === 10 || byte === 13;
+
+    if (isPrintableAscii || isWhitespace) {
+      current += String.fromCharCode(byte);
+    } else {
+      if (current.length >= minLength) {
+        strings.push(current.trim());
+      }
+      current = "";
+    }
+  }
+
+  if (current.length >= minLength) {
+    strings.push(current.trim());
+  }
+
+  return strings.join("\n");
+}
+
+async function extractStructuredTextByFormat(ext, buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+
+  if (ext === "pdf") {
+    let parser = null;
+    try {
+      parser = new PDFParse({ data: buffer });
+      const parsed = await parser.getText();
+      const normalized = trimExtractedText(sanitizeExtractedText(parsed?.text || ""));
+      return normalized || null;
+    } catch (_error) {
+      return null;
+    } finally {
+      if (parser) {
+        try {
+          await parser.destroy();
+        } catch (_destroyError) {
+          // Ignore parser teardown failures.
+        }
+      }
+    }
+  }
+
+  if (ext === "docx") {
+    try {
+      const parsed = await mammoth.extractRawText({ buffer });
+      const normalized = trimExtractedText(sanitizeExtractedText(parsed?.value || ""));
+      return normalized || null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function extractAttachmentTextBestEffort(attachment = {}) {
+  if (!attachment || typeof attachment !== "object") return null;
+  if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) {
+    return trimExtractedText(sanitizeExtractedText(attachment.extracted_text));
+  }
+  if (typeof attachment.path !== "string" || !attachment.path.trim()) return null;
+
+  try {
+    const stat = fs.statSync(attachment.path);
+    if (!stat.isFile()) return null;
+    if (!Number.isFinite(ATTACHMENT_TEXT_MAX_BYTES) || ATTACHMENT_TEXT_MAX_BYTES <= 0) return null;
+    if (stat.size <= 0 || stat.size > ATTACHMENT_TEXT_MAX_BYTES) return null;
+
+    const buffer = await fs.promises.readFile(attachment.path);
+    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.path));
+
+    const structuredText = await extractStructuredTextByFormat(ext, buffer);
+    if (structuredText) {
+      return structuredText;
+    }
+
+    if (TEXT_ATTACHMENT_EXTENSIONS.has(ext)) {
+      const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
+      return normalized || null;
+    }
+
+    if (ext === "pdf") {
+      const printable = trimExtractedText(sanitizeExtractedText(extractPrintableStrings(buffer)));
+      return printable || null;
+    }
+
+    if (!looksBinaryBuffer(buffer)) {
+      const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
+      return normalized || null;
+    }
+
+    return null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function normalizeAttachmentPaths(args) {
   const raw = [];
 
@@ -840,6 +1008,14 @@ async function deriveContextAttachments(req, args) {
 
     if (archive) {
       attachment.archive = archive;
+    }
+  }
+
+  for (const attachment of deduped) {
+    if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) continue;
+    const extractedText = await extractAttachmentTextBestEffort(attachment);
+    if (extractedText) {
+      attachment.extracted_text = extractedText;
     }
   }
 

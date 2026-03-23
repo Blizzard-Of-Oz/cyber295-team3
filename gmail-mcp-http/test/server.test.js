@@ -143,6 +143,65 @@ test('buildOpaInput sets dns_tunneling_detected for suspicious exfil domains', a
   assert.equal(input.context.dns_tunneling_signals.flagged_reasons.suspicious_domain_pattern_count, 1);
 });
 
+test('buildOpaInput extracts best-effort attachment text for OPA context', async () => {
+  const fixtureDir = path.join(__dirname, 'fixtures');
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  const attachmentPath = path.join(fixtureDir, `attachment-${Date.now()}.txt`);
+  fs.writeFileSync(attachmentPath, 'Internal note: proprietary roadmap details.', 'utf8');
+
+  try {
+    const req = makeRequest({
+      name: 'send_email',
+      arguments: {
+        to: ['alice@company.com'],
+        subject: 'Attachment test',
+        body: 'Please review.',
+        attachments: [attachmentPath]
+      },
+      context: {}
+    });
+
+    const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+
+    assert.equal(input.context.attachments.length, 1);
+    assert.equal(
+      input.context.attachments[0].extracted_text,
+      'Internal note: proprietary roadmap details.'
+    );
+  } finally {
+    try {
+      fs.unlinkSync(attachmentPath);
+    } catch (_error) {
+      // ignore cleanup failure in tests
+    }
+  }
+});
+
+test('buildOpaInput preserves provided attachment extracted_text', async () => {
+  const req = makeRequest({
+    name: 'send_email',
+    arguments: {
+      to: ['alice@company.com'],
+      subject: 'Attachment test',
+      body: 'Please review.'
+    },
+    context: {
+      attachments: [
+        {
+          name: 'memo.txt',
+          file_ext: 'txt',
+          extracted_text: 'Already extracted by upstream parser.'
+        }
+      ]
+    }
+  });
+
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+
+  assert.equal(input.context.attachments.length, 1);
+  assert.equal(input.context.attachments[0].extracted_text, 'Already extracted by upstream parser.');
+});
+
 test('normalizeOpaDecision supports current OPA object response shape', () => {
   const decision = normalizeOpaDecision({
     result: {
