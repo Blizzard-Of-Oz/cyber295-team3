@@ -57,6 +57,18 @@ function debugLog(message, meta) {
   console.log("---");
 }
 
+function infoLog(message, meta) {
+  if (meta !== undefined) {
+    try {
+      console.log(`[agent-ui] ${message}`, JSON.stringify(meta));
+    } catch {
+      console.log(`[agent-ui] ${message}`, meta);
+    }
+  } else {
+    console.log(`[agent-ui] ${message}`);
+  }
+}
+
 const mcpClientManager = new McpClientManager();
 const agent = createAgent({ mcpClientManager });
 
@@ -303,12 +315,20 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
     return res.status(400).json({ error: "requirement is required" });
   }
 
+  const assistRequestId = crypto.randomBytes(6).toString("hex");
   let uploaded = { paths: [], metadata: [], cleanup: async () => {} };
   const requestAbortController = new AbortController();
   const abortRequest = (eventName) => {
     if (requestAbortController.signal.aborted) return;
     requestAbortController.abort();
+    infoLog("Assist request canceled by user", {
+      requestId: assistRequestId,
+      event: eventName,
+      ip: req.ip,
+      url: req.url
+    });
     debugLog("Assist request aborted by client", {
+      requestId: assistRequestId,
       event: eventName,
       ip: req.ip,
       url: req.url
@@ -363,6 +383,10 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
     });
   } catch (error) {
     if (requestAbortController.signal.aborted) {
+      infoLog("Agent run canceled", {
+        requestId: assistRequestId,
+        reason: "Client aborted request"
+      });
       debugLog("Agent run canceled", { reason: "Client aborted request" });
       if (!res.headersSent) {
         return res.status(499).json({ error: "Request canceled by client" });
