@@ -39,6 +39,12 @@ const ATTACHMENT_TEXT_MAX_CHARS = process.env.ATTACHMENT_TEXT_MAX_CHARS
 const ATTACHMENT_IMAGE_OCR_MODEL_DEFAULT = "gpt-4.1-mini";
 const ATTACHMENT_IMAGE_OCR_TIMEOUT_MS_DEFAULT = 10000;
 const ATTACHMENT_IMAGE_MAX_BYTES_DEFAULT = 5 * 1024 * 1024;
+const ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES = process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES
+  ? Number(process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES)
+  : 50;
+const ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES = process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES
+  ? Number(process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES)
+  : 262144;
 const OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1";
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
@@ -714,6 +720,36 @@ function sanitizeExtractedText(value) {
     .trim();
 }
 
+function normalizeExtractedTextJson(filename, extractedText) {
+  const cleanedText = trimExtractedText(sanitizeExtractedText(extractedText));
+  if (!cleanedText) return null;
+  const safeFilename =
+    (typeof filename === "string" && filename.trim())
+      ? filename.trim()
+      : "unknown";
+  return JSON.stringify([
+    {
+      filename: safeFilename,
+      extracted_text: cleanedText
+    }
+  ]);
+}
+
+function isExtractedTextJsonArray(value) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length === 0) return false;
+    return parsed.every((entry) =>
+      entry && typeof entry === "object" &&
+      typeof entry.filename === "string" &&
+      typeof entry.extracted_text === "string"
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
 function trimExtractedText(value, maxChars = ATTACHMENT_TEXT_MAX_CHARS) {
   if (typeof value !== "string") return "";
   if (value.length <= maxChars) return value;
@@ -967,6 +1003,227 @@ async function extractStructuredTextByFormat(ext, buffer) {
   return null;
 }
 
+async function extractTextFromBufferBestEffort({ ext, buffer, sourceName = null }) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+
+  const structuredText = await extractStructuredTextByFormat(ext, buffer);
+  if (structuredText) {
+    debugLog("Attachment text extracted via structured parser", {
+      name: sourceName,
+      ext,
+      extracted_chars: structuredText.length
+    });
+    return structuredText;
+  }
+
+  if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) {
+    debugLog("Attachment text extraction ended without text for image", {
+      name: sourceName,
+      ext
+    });
+    return null;
+  }
+
+  if (TEXT_ATTACHMENT_EXTENSIONS.has(ext)) {
+    const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
+    if (normalized) {
+      debugLog("Attachment text extracted via UTF-8 text decode", {
+        name: sourceName,
+        ext,
+        extracted_chars: normalized.length
+      });
+    }
+    return normalized || null;
+  }
+
+  if (ext === "pdf") {
+    const printable = trimExtractedText(sanitizeExtractedText(extractPrintableStrings(buffer)));
+    return printable || null;
+  }
+
+  if (!looksBinaryBuffer(buffer)) {
+    const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
+    if (normalized) {
+      debugLog("Attachment text extracted via binary-safe UTF-8 fallback", {
+        name: sourceName,
+        ext,
+        extracted_chars: normalized.length
+      });
+    }
+    return normalized || null;
+  }
+
+  debugLog("Attachment text extraction found no usable text", {
+    name: sourceName,
+    ext
+  });
+  return null;
+}
+
+function readZipEntryBuffer(zipFile, entry, maxBytes = ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES) {
+  return new Promise((resolve) => {
+    zipFile.openReadStream(entry, (streamError, stream) => {
+      if (streamError || !stream) {
+        resolve(null);
+        return;
+      }
+
+      const chunks = [];
+      let total = 0;
+      let exceeded = false;
+
+      stream.on("data", (chunk) => {
+        if (exceeded || !Buffer.isBuffer(chunk)) return;
+        total += chunk.length;
+        if (total > maxBytes) {
+          exceeded = true;
+          stream.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+
+      stream.on("error", () => resolve(null));
+      stream.on("close", () => {
+        if (exceeded) {
+          resolve(null);
+          return;
+        }
+        resolve(Buffer.concat(chunks));
+      });
+      stream.on("end", () => {
+        if (!exceeded) {
+          resolve(Buffer.concat(chunks));
+        }
+      });
+    });
+  });
+}
+
+async function extractZipArchiveEntryTexts(filePath) {
+  return new Promise((resolve) => {
+    yauzl.open(filePath, { lazyEntries: true, autoClose: true }, (openError, zipFile) => {
+      if (openError || !zipFile) {
+        resolve([]);
+        return;
+      }
+
+      const entries = [];
+      let inspectedFiles = 0;
+      let finished = false;
+
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        resolve(entries);
+      };
+
+      zipFile.on("error", () => done());
+      zipFile.on("end", () => done());
+
+      zipFile.on("entry", async (entry) => {
+        if (!entry || /\/$/.test(entry.fileName || "")) {
+          zipFile.readEntry();
+          return;
+        }
+
+        if (inspectedFiles >= ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES) {
+          done();
+          return;
+        }
+        inspectedFiles += 1;
+
+        const entryName = entry.fileName;
+        const entryExt = fileExtension(path.basename(entryName));
+        const entryBuffer = await readZipEntryBuffer(zipFile, entry, ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES);
+        if (entryBuffer && entryBuffer.length > 0) {
+          const extracted = await extractTextFromBufferBestEffort({
+            ext: entryExt,
+            buffer: entryBuffer,
+            sourceName: entryName
+          });
+          if (extracted) {
+            entries.push({
+              filename: entryName,
+              extracted_text: extracted
+            });
+          }
+        }
+
+        zipFile.readEntry();
+      });
+
+      zipFile.readEntry();
+    });
+  });
+}
+
+async function extractTarArchiveEntryTexts(filePath) {
+  const entries = [];
+  let inspectedFiles = 0;
+
+  try {
+    await tar.t({
+      file: filePath,
+      onentry: (entry) => {
+        if (!entry || entry.type !== "File") return;
+        if (inspectedFiles >= ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES) {
+          entry.resume();
+          return;
+        }
+        inspectedFiles += 1;
+
+        const chunks = [];
+        let total = 0;
+        let exceeded = false;
+
+        entry.on("data", (chunk) => {
+          if (exceeded || !Buffer.isBuffer(chunk)) return;
+          total += chunk.length;
+          if (total > ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES) {
+            exceeded = true;
+            return;
+          }
+          chunks.push(chunk);
+        });
+
+        entry.on("end", async () => {
+          if (exceeded) return;
+          const entryBuffer = Buffer.concat(chunks);
+          const entryName = entry.path || "unknown";
+          const entryExt = fileExtension(path.basename(entryName));
+          const extracted = await extractTextFromBufferBestEffort({
+            ext: entryExt,
+            buffer: entryBuffer,
+            sourceName: entryName
+          });
+          if (extracted) {
+            entries.push({
+              filename: entryName,
+              extracted_text: extracted
+            });
+          }
+        });
+      }
+    });
+  } catch (_error) {
+    return [];
+  }
+
+  return entries;
+}
+
+async function extractArchiveEntryTexts(filePath, ext) {
+  if (!filePath || !ext || !isArchiveExtension(ext)) return [];
+  if (ext === "zip") {
+    return extractZipArchiveEntryTexts(filePath);
+  }
+  if (isTarLikeArchive(filePath, ext)) {
+    return extractTarArchiveEntryTexts(filePath);
+  }
+  return [];
+}
+
 async function extractAttachmentTextBestEffort(attachment = {}) {
   if (!attachment || typeof attachment !== "object") return null;
   if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) {
@@ -992,60 +1249,11 @@ async function extractAttachmentTextBestEffort(attachment = {}) {
 
     const buffer = await fs.promises.readFile(attachment.path);
     const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.path));
-
-    const structuredText = await extractStructuredTextByFormat(ext, buffer);
-    if (structuredText) {
-      debugLog("Attachment text extracted via structured parser", {
-        name: attachment.name || path.basename(attachment.path),
-        ext,
-        extracted_chars: structuredText.length
-      });
-      return structuredText;
-    }
-
-    // Skip raw byte decoding for image formats when OCR is unavailable or returns no text.
-    if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) {
-      debugLog("Attachment text extraction ended without text for image", {
-        name: attachment.name || path.basename(attachment.path),
-        ext
-      });
-      return null;
-    }
-
-    if (TEXT_ATTACHMENT_EXTENSIONS.has(ext)) {
-      const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
-      if (normalized) {
-        debugLog("Attachment text extracted via UTF-8 text decode", {
-          name: attachment.name || path.basename(attachment.path),
-          ext,
-          extracted_chars: normalized.length
-        });
-      }
-      return normalized || null;
-    }
-
-    if (ext === "pdf") {
-      const printable = trimExtractedText(sanitizeExtractedText(extractPrintableStrings(buffer)));
-      return printable || null;
-    }
-
-    if (!looksBinaryBuffer(buffer)) {
-      const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
-      if (normalized) {
-        debugLog("Attachment text extracted via binary-safe UTF-8 fallback", {
-          name: attachment.name || path.basename(attachment.path),
-          ext,
-          extracted_chars: normalized.length
-        });
-      }
-      return normalized || null;
-    }
-
-    debugLog("Attachment text extraction found no usable text", {
-      name: attachment.name || path.basename(attachment.path),
-      ext
+    return extractTextFromBufferBestEffort({
+      ext,
+      buffer,
+      sourceName: attachment.name || path.basename(attachment.path)
     });
-    return null;
   } catch (_error) {
     debugLog("Attachment text extraction failed", {
       name: attachment.name || null,
@@ -1225,10 +1433,50 @@ async function deriveContextAttachments(req, args) {
   }
 
   for (const attachment of deduped) {
+    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || ""));
+    if (!isArchiveExtension(ext)) continue;
+    if (!attachment.path || typeof attachment.path !== "string") continue;
+
+    const entryTexts = await extractArchiveEntryTexts(attachment.path, ext);
+    if (entryTexts.length > 0) {
+      const jsonText = JSON.stringify(entryTexts);
+      const normalized = trimExtractedText(sanitizeExtractedText(jsonText));
+      if (normalized) {
+        attachment.extracted_text = normalized;
+        debugLog("Archive attachment text extracted from entries", {
+          name: attachment.name || path.basename(attachment.path),
+          ext,
+          entry_count_with_text: entryTexts.length,
+          extracted_chars: normalized.length
+        });
+      }
+    }
+  }
+
+  for (const attachment of deduped) {
+    if (typeof attachment.extracted_text !== "string" || !attachment.extracted_text.trim()) continue;
+    if (isExtractedTextJsonArray(attachment.extracted_text)) continue;
+
+    const normalized = normalizeExtractedTextJson(
+      attachment.name || path.basename(attachment.path || "") || "unknown",
+      attachment.extracted_text
+    );
+    if (normalized) {
+      attachment.extracted_text = normalized;
+    }
+  }
+
+  for (const attachment of deduped) {
     if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) continue;
     const extractedText = await extractAttachmentTextBestEffort(attachment);
     if (extractedText) {
-      attachment.extracted_text = extractedText;
+      const normalized = normalizeExtractedTextJson(
+        attachment.name || path.basename(attachment.path || "") || "unknown",
+        extractedText
+      );
+      if (normalized) {
+        attachment.extracted_text = normalized;
+      }
     }
   }
 

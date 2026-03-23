@@ -791,11 +791,36 @@ dependency_confusion if {
 # ---------------------------------------------------------
 # UC8 — Confidential keywords (deny external sharing)
 # ---------------------------------------------------------
-attachment_extracted_texts := [txt |
+attachment_extracted_text_is_json_array(raw) if {
+  parsed := json.unmarshal(raw)
+  type_name(parsed) == "array"
+}
+
+attachment_extracted_text_values[txt] if {
   some a in attachments
-  txt := object.get(a, "extracted_text", "")
+  raw := object.get(a, "extracted_text", "")
+  type_name(raw) == "string"
+  trim_space(raw) != ""
+  attachment_extracted_text_is_json_array(raw)
+  parsed := json.unmarshal(raw)
+  some item in parsed
+  type_name(item) == "object"
+  txt := object.get(item, "extracted_text", "")
   type_name(txt) == "string"
   trim_space(txt) != ""
+}
+
+attachment_extracted_text_values[txt] if {
+  some a in attachments
+  raw := object.get(a, "extracted_text", "")
+  type_name(raw) == "string"
+  trim_space(raw) != ""
+  not attachment_extracted_text_is_json_array(raw)
+  txt := raw
+}
+
+attachment_extracted_texts := [txt |
+  attachment_extracted_text_values[txt]
 ]
 
 confidential_scan_text := concat("\n", [

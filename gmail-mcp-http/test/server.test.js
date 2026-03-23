@@ -164,10 +164,11 @@ test('buildOpaInput extracts best-effort attachment text for OPA context', async
     const input = await buildOpaInput(req, 'send_email', req.body.arguments);
 
     assert.equal(input.context.attachments.length, 1);
-    assert.equal(
-      input.context.attachments[0].extracted_text,
-      'Internal note: proprietary roadmap details.'
-    );
+    const extracted = JSON.parse(input.context.attachments[0].extracted_text);
+    assert.equal(Array.isArray(extracted), true);
+    assert.equal(extracted.length, 1);
+    assert.equal(extracted[0].filename.endsWith('.txt'), true);
+    assert.equal(extracted[0].extracted_text, 'Internal note: proprietary roadmap details.');
   } finally {
     try {
       fs.unlinkSync(attachmentPath);
@@ -199,7 +200,11 @@ test('buildOpaInput preserves provided attachment extracted_text', async () => {
   const input = await buildOpaInput(req, 'send_email', req.body.arguments);
 
   assert.equal(input.context.attachments.length, 1);
-  assert.equal(input.context.attachments[0].extracted_text, 'Already extracted by upstream parser.');
+  const extracted = JSON.parse(input.context.attachments[0].extracted_text);
+  assert.equal(Array.isArray(extracted), true);
+  assert.equal(extracted.length, 1);
+  assert.equal(extracted[0].filename, 'memo.txt');
+  assert.equal(extracted[0].extracted_text, 'Already extracted by upstream parser.');
 });
 
 test('buildOpaInput extracts image text via LLM OCR when enabled', async () => {
@@ -243,7 +248,11 @@ test('buildOpaInput extracts image text via LLM OCR when enabled', async () => {
 
     const input = await buildOpaInput(req, 'send_email', req.body.arguments);
     assert.equal(input.context.attachments.length, 1);
-    assert.equal(input.context.attachments[0].extracted_text, 'Screenshot text: internal budget FY2026');
+    const extracted = JSON.parse(input.context.attachments[0].extracted_text);
+    assert.equal(Array.isArray(extracted), true);
+    assert.equal(extracted.length, 1);
+    assert.equal(extracted[0].filename.endsWith('.png'), true);
+    assert.equal(extracted[0].extracted_text, 'Screenshot text: internal budget FY2026');
   } finally {
     global.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalOpenAiKey;
@@ -307,7 +316,11 @@ test('buildOpaInput extracts image text from nested Responses API output format'
 
     const input = await buildOpaInput(req, 'send_email', req.body.arguments);
     assert.equal(input.context.attachments.length, 1);
-    assert.equal(input.context.attachments[0].extracted_text, 'Nested output text from image');
+    const extracted = JSON.parse(input.context.attachments[0].extracted_text);
+    assert.equal(Array.isArray(extracted), true);
+    assert.equal(extracted.length, 1);
+    assert.equal(extracted[0].filename.endsWith('.png'), true);
+    assert.equal(extracted[0].extracted_text, 'Nested output text from image');
   } finally {
     global.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalOpenAiKey;

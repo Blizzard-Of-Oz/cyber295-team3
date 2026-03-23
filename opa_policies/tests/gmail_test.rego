@@ -972,7 +972,7 @@ test_deny_confidential_keyword_in_attachment_extracted_text_external if {
         {
           "name": "notes.txt",
           "file_ext": ".txt",
-          "extracted_text": "This document is proprietary and internal.",
+          "extracted_text": "[{\"filename\":\"notes.txt\",\"extracted_text\":\"This document is proprietary and internal.\"}]",
         },
       ],
     },
@@ -999,7 +999,7 @@ test_deny_confidential_pattern_in_attachment_extracted_text_external if {
         {
           "name": "payroll.txt",
           "file_ext": ".txt",
-          "extracted_text": "Payroll record includes SSN 987-65-4321.",
+          "extracted_text": "[{\"filename\":\"payroll.txt\",\"extracted_text\":\"Payroll record includes SSN 987-65-4321.\"}]",
         },
       ],
     },
