@@ -791,11 +791,19 @@ dependency_confusion if {
 # ---------------------------------------------------------
 # UC8 — Confidential keywords (deny external sharing)
 # ---------------------------------------------------------
+attachment_extracted_texts := [txt |
+  some a in attachments
+  txt := object.get(a, "extracted_text", "")
+  type_name(txt) == "string"
+  trim_space(txt) != ""
+]
+
 confidential_scan_text := concat("\n", [
   content_text,
   object.get(ctx, "subject", ""),
   request_email_body,
   request_email_subject,
+  concat("\n", attachment_extracted_texts),
 ])
 
 confidential_keyword_found if {

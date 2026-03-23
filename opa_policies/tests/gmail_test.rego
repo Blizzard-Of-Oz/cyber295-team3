@@ -957,6 +957,60 @@ test_deny_confidential_keyword_in_request_subject_external if {
   result.reason == "Confidential content detected; external sharing is blocked."
 }
 
+test_deny_confidential_keyword_in_attachment_extracted_text_external if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong+allow1@gmail.com"],
+      "content_text": "",
+      "user_input": "Send externally",
+      "attachment_bytes": 1000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "name": "notes.txt",
+          "file_ext": ".txt",
+          "extracted_text": "This document is proprietary and internal.",
+        },
+      ],
+    },
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "confidential_keyword_found" in result.triggered_controls
+  result.reason == "Confidential content detected; external sharing is blocked."
+}
+
+test_deny_confidential_pattern_in_attachment_extracted_text_external if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong+allow1@gmail.com"],
+      "content_text": "",
+      "user_input": "Send externally",
+      "attachment_bytes": 1000,
+      "data_classification": "none",
+      "record_count": 0,
+      "attachments": [
+        {
+          "name": "payroll.txt",
+          "file_ext": ".txt",
+          "extracted_text": "Payroll record includes SSN 987-65-4321.",
+        },
+      ],
+    },
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "confidential_pattern_found" in result.triggered_controls
+  result.reason == "Confidential content detected; external sharing is blocked."
+}
+
 # =========================================================
 # NEW TESTS FOR ADDED USE CASES IN gmail.rego
 # =========================================================
