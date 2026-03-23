@@ -202,6 +202,124 @@ test('buildOpaInput preserves provided attachment extracted_text', async () => {
   assert.equal(input.context.attachments[0].extracted_text, 'Already extracted by upstream parser.');
 });
 
+test('buildOpaInput extracts image text via LLM OCR when enabled', async () => {
+  const fixtureDir = path.join(__dirname, 'fixtures');
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  const attachmentPath = path.join(fixtureDir, `attachment-${Date.now()}.png`);
+  fs.writeFileSync(attachmentPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0a]));
+
+  const originalFetch = global.fetch;
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  const originalOcrEnabled = process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM;
+
+  process.env.OPENAI_API_KEY = 'test-key';
+  process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM = 'true';
+
+  global.fetch = async (url) => {
+    if (String(url).includes('/responses')) {
+      return {
+        ok: true,
+        async json() {
+          return {
+            output_text: 'Screenshot text: internal budget FY2026'
+          };
+        }
+      };
+    }
+    return originalFetch(url);
+  };
+
+  try {
+    const req = makeRequest({
+      name: 'send_email',
+      arguments: {
+        to: ['alice@company.com'],
+        subject: 'Image OCR test',
+        body: 'Please review image',
+        attachments: [attachmentPath]
+      },
+      context: {}
+    });
+
+    const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+    assert.equal(input.context.attachments.length, 1);
+    assert.equal(input.context.attachments[0].extracted_text, 'Screenshot text: internal budget FY2026');
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalOpenAiKey;
+    process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM = originalOcrEnabled;
+    try {
+      fs.unlinkSync(attachmentPath);
+    } catch (_error) {
+      // ignore cleanup failure in tests
+    }
+  }
+});
+
+test('buildOpaInput extracts image text from nested Responses API output format', async () => {
+  const fixtureDir = path.join(__dirname, 'fixtures');
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  const attachmentPath = path.join(fixtureDir, `attachment-${Date.now()}-nested.png`);
+  fs.writeFileSync(attachmentPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0a]));
+
+  const originalFetch = global.fetch;
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  const originalOcrEnabled = process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM;
+
+  process.env.OPENAI_API_KEY = 'test-key';
+  process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM = 'true';
+
+  global.fetch = async (url) => {
+    if (String(url).includes('/responses')) {
+      return {
+        ok: true,
+        async json() {
+          return {
+            output: [
+              {
+                type: 'message',
+                content: [
+                  {
+                    type: 'output_text',
+                    text: 'Nested output text from image'
+                  }
+                ]
+              }
+            ]
+          };
+        }
+      };
+    }
+    return originalFetch(url);
+  };
+
+  try {
+    const req = makeRequest({
+      name: 'send_email',
+      arguments: {
+        to: ['alice@company.com'],
+        subject: 'Image OCR nested output test',
+        body: 'Please review image',
+        attachments: [attachmentPath]
+      },
+      context: {}
+    });
+
+    const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+    assert.equal(input.context.attachments.length, 1);
+    assert.equal(input.context.attachments[0].extracted_text, 'Nested output text from image');
+  } finally {
+    global.fetch = originalFetch;
+    process.env.OPENAI_API_KEY = originalOpenAiKey;
+    process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM = originalOcrEnabled;
+    try {
+      fs.unlinkSync(attachmentPath);
+    } catch (_error) {
+      // ignore cleanup failure in tests
+    }
+  }
+});
+
 test('normalizeOpaDecision supports current OPA object response shape', () => {
   const decision = normalizeOpaDecision({
     result: {

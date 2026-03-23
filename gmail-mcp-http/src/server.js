@@ -36,6 +36,10 @@ const ATTACHMENT_TEXT_MAX_BYTES = process.env.ATTACHMENT_TEXT_MAX_BYTES
 const ATTACHMENT_TEXT_MAX_CHARS = process.env.ATTACHMENT_TEXT_MAX_CHARS
   ? Number(process.env.ATTACHMENT_TEXT_MAX_CHARS)
   : 8000;
+const ATTACHMENT_IMAGE_OCR_MODEL_DEFAULT = "gpt-4.1-mini";
+const ATTACHMENT_IMAGE_OCR_TIMEOUT_MS_DEFAULT = 10000;
+const ATTACHMENT_IMAGE_MAX_BYTES_DEFAULT = 5 * 1024 * 1024;
+const OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1";
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -54,6 +58,7 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "sql",
   "rtf"
 ]);
+const IMAGE_ATTACHMENT_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"]);
 const ATTACHMENT_SANDBOX_SOURCE = process.env.ATTACHMENT_SANDBOX_ROOT
       ? "ATTACHMENT_SANDBOX_ROOT"
     : "default";
@@ -764,6 +769,164 @@ function extractPrintableStrings(buffer, minLength = 4) {
   return strings.join("\n");
 }
 
+function mimeTypeForImageExtension(ext) {
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "bmp":
+      return "image/bmp";
+    case "tif":
+    case "tiff":
+      return "image/tiff";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function imageOcrEnabled() {
+  return process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM === "true";
+}
+
+function imageOcrModel() {
+  return process.env.ATTACHMENT_IMAGE_OCR_MODEL || ATTACHMENT_IMAGE_OCR_MODEL_DEFAULT;
+}
+
+function imageOcrTimeoutMs() {
+  const configured = Number(process.env.ATTACHMENT_IMAGE_OCR_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : ATTACHMENT_IMAGE_OCR_TIMEOUT_MS_DEFAULT;
+}
+
+function imageOcrMaxBytes() {
+  const configured = Number(process.env.ATTACHMENT_IMAGE_MAX_BYTES);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : ATTACHMENT_IMAGE_MAX_BYTES_DEFAULT;
+}
+
+function openAiBaseUrl() {
+  return process.env.OPENAI_BASE_URL || OPENAI_BASE_URL_DEFAULT;
+}
+
+function openAiApiKey() {
+  return process.env.OPENAI_API_KEY || "";
+}
+
+async function extractImageTextWithLlm(ext, buffer) {
+  if (!imageOcrEnabled()) {
+    debugLog("Image OCR skipped: ATTACHMENT_IMAGE_OCR_WITH_LLM is disabled", { ext });
+    return null;
+  }
+  const apiKey = openAiApiKey();
+  if (!apiKey) {
+    debugLog("Image OCR skipped: OPENAI_API_KEY is missing", { ext });
+    return null;
+  }
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+  if (!IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) return null;
+  const maxBytes = imageOcrMaxBytes();
+  if (buffer.length > maxBytes) {
+    debugLog("Image OCR skipped: attachment exceeds ATTACHMENT_IMAGE_MAX_BYTES", {
+      ext,
+      size_bytes: buffer.length,
+      max_bytes: maxBytes
+    });
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), imageOcrTimeoutMs());
+
+  try {
+    debugLog("Image OCR request started", {
+      ext,
+      size_bytes: buffer.length,
+      model: imageOcrModel()
+    });
+    const mimeType = mimeTypeForImageExtension(ext);
+    const base64Image = buffer.toString("base64");
+    const dataUrl = `data:${mimeType};base64,${base64Image}`;
+
+    const response = await fetch(`${openAiBaseUrl()}/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: imageOcrModel(),
+        store: false,
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: "Extract all visible text from this image. Return plain text only."
+              },
+              {
+                type: "input_image",
+                image_url: dataUrl
+              }
+            ]
+          }
+        ]
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      debugLog("Image OCR request failed", { ext, status: response.status });
+      return null;
+    }
+    const payload = await response.json().catch(() => null);
+    if (!payload || typeof payload !== "object") return null;
+
+    const responseText = extractResponsesApiText(payload);
+    const normalized = trimExtractedText(sanitizeExtractedText(responseText));
+    debugLog("Image OCR request completed", {
+      ext,
+      extracted_chars: normalized.length
+    });
+    return normalized || null;
+  } catch (_error) {
+    debugLog("Image OCR request threw error", { ext });
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function extractResponsesApiText(payload) {
+  if (!payload || typeof payload !== "object") return "";
+
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text;
+  }
+
+  const outputItems = Array.isArray(payload.output) ? payload.output : [];
+  const chunks = [];
+
+  for (const item of outputItems) {
+    const contentItems = Array.isArray(item?.content) ? item.content : [];
+    for (const content of contentItems) {
+      if (content?.type === "output_text" && typeof content.text === "string" && content.text.trim()) {
+        chunks.push(content.text);
+      }
+    }
+  }
+
+  return chunks.join("\n");
+}
+
 async function extractStructuredTextByFormat(ext, buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
 
@@ -797,12 +960,19 @@ async function extractStructuredTextByFormat(ext, buffer) {
     }
   }
 
+  if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) {
+    return extractImageTextWithLlm(ext, buffer);
+  }
+
   return null;
 }
 
 async function extractAttachmentTextBestEffort(attachment = {}) {
   if (!attachment || typeof attachment !== "object") return null;
   if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) {
+    debugLog("Attachment text extraction skipped: extracted_text already provided", {
+      name: attachment.name || null
+    });
     return trimExtractedText(sanitizeExtractedText(attachment.extracted_text));
   }
   if (typeof attachment.path !== "string" || !attachment.path.trim()) return null;
@@ -811,18 +981,46 @@ async function extractAttachmentTextBestEffort(attachment = {}) {
     const stat = fs.statSync(attachment.path);
     if (!stat.isFile()) return null;
     if (!Number.isFinite(ATTACHMENT_TEXT_MAX_BYTES) || ATTACHMENT_TEXT_MAX_BYTES <= 0) return null;
-    if (stat.size <= 0 || stat.size > ATTACHMENT_TEXT_MAX_BYTES) return null;
+    if (stat.size <= 0 || stat.size > ATTACHMENT_TEXT_MAX_BYTES) {
+      debugLog("Attachment text extraction skipped due to size limits", {
+        name: attachment.name || path.basename(attachment.path),
+        size_bytes: stat.size,
+        max_bytes: ATTACHMENT_TEXT_MAX_BYTES
+      });
+      return null;
+    }
 
     const buffer = await fs.promises.readFile(attachment.path);
     const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.path));
 
     const structuredText = await extractStructuredTextByFormat(ext, buffer);
     if (structuredText) {
+      debugLog("Attachment text extracted via structured parser", {
+        name: attachment.name || path.basename(attachment.path),
+        ext,
+        extracted_chars: structuredText.length
+      });
       return structuredText;
+    }
+
+    // Skip raw byte decoding for image formats when OCR is unavailable or returns no text.
+    if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) {
+      debugLog("Attachment text extraction ended without text for image", {
+        name: attachment.name || path.basename(attachment.path),
+        ext
+      });
+      return null;
     }
 
     if (TEXT_ATTACHMENT_EXTENSIONS.has(ext)) {
       const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
+      if (normalized) {
+        debugLog("Attachment text extracted via UTF-8 text decode", {
+          name: attachment.name || path.basename(attachment.path),
+          ext,
+          extracted_chars: normalized.length
+        });
+      }
       return normalized || null;
     }
 
@@ -833,11 +1031,26 @@ async function extractAttachmentTextBestEffort(attachment = {}) {
 
     if (!looksBinaryBuffer(buffer)) {
       const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
+      if (normalized) {
+        debugLog("Attachment text extracted via binary-safe UTF-8 fallback", {
+          name: attachment.name || path.basename(attachment.path),
+          ext,
+          extracted_chars: normalized.length
+        });
+      }
       return normalized || null;
     }
 
+    debugLog("Attachment text extraction found no usable text", {
+      name: attachment.name || path.basename(attachment.path),
+      ext
+    });
     return null;
   } catch (_error) {
+    debugLog("Attachment text extraction failed", {
+      name: attachment.name || null,
+      path: attachment.path || null
+    });
     return null;
   }
 }
@@ -1018,6 +1231,12 @@ async function deriveContextAttachments(req, args) {
       attachment.extracted_text = extractedText;
     }
   }
+
+  debugLog("Derived attachment context for OPA", {
+    count: deduped.length,
+    with_archive_metadata: deduped.filter((a) => a.archive && typeof a.archive === "object").length,
+    with_extracted_text: deduped.filter((a) => typeof a.extracted_text === "string" && a.extracted_text.trim()).length
+  });
 
   return deduped;
 }
