@@ -147,6 +147,11 @@ bcc := object.get(ctx, "bcc", [])
 content_text := object.get(ctx, "content_text", "")
 user_input := object.get(ctx, "user_input", "")
 
+# Raw MCP request payload fields (for direct OPA request-based scanning)
+request_body_payload := object.get(object.get(input, "request", {}), "body", {})
+request_email_body := object.get(request_body_payload, "body", "")
+request_email_subject := object.get(request_body_payload, "subject", "")
+
 attachments := object.get(ctx, "attachments", [])
 urls := object.get(ctx, "urls", [])
 
@@ -786,15 +791,31 @@ dependency_confusion if {
 # ---------------------------------------------------------
 # UC8 — Confidential keywords (deny external sharing)
 # ---------------------------------------------------------
+confidential_scan_text := concat("\n", [
+  content_text,
+  object.get(ctx, "subject", ""),
+  request_email_body,
+  request_email_subject,
+])
+
 confidential_keyword_found if {
   kws := object.get(cfg, "confidential_keywords", [])
   some kw in kws
-  contains(lower(content_text), lower(kw))
-} else if {
-  kws := object.get(cfg, "confidential_keywords", [])
-  some kw in kws
-  contains(lower(object.get(ctx, "subject", "")), lower(kw))
+  kw_trimmed := trim_space(kw)
+  kw_trimmed != ""
+  contains(lower(confidential_scan_text), lower(kw_trimmed))
 }
+
+confidential_pattern_found if {
+  patterns := object.get(cfg, "confidential_regex_patterns", [])
+  some p in patterns
+  pattern := trim_space(p)
+  pattern != ""
+  regex.match(pattern, confidential_scan_text)
+}
+
+confidential_data_found if { confidential_keyword_found }
+confidential_data_found if { confidential_pattern_found }
 
 # =========================================================
 # Triggered controls (telemetry)
@@ -839,6 +860,7 @@ triggered_controls[c] if { vendor_bec_suspected; c := "vendor_bec_quarantine" } 
 triggered_controls[c] if { dependency_confusion; c := "dependency_confusion_detected" }    # UC38
 triggered_controls[c] if { language_anomaly; c := "language_anomaly_warn" }                # UC23
 triggered_controls[c] if { confidential_keyword_found; c := "confidential_keyword_found" } # UC8
+triggered_controls[c] if { confidential_pattern_found; c := "confidential_pattern_found" } # UC8
 
 # =========================================================
 # Reasons
@@ -932,7 +954,7 @@ deny_reasons[r] if { multi_stage_payload; r := "Multi-stage payload delivery sus
 deny_reasons[r] if { lolbin_detected; r := "LOLBin / living-off-the-land command pattern detected." } # UC33
 deny_reasons[r] if { oauth_phishing; r := "OAuth phishing detected (unapproved client, high-risk scopes, or untrusted redirect)." } # UC34
 deny_reasons[r] if { dependency_confusion; r := "Dependency confusion / public-registry install pattern detected." } # UC38
-deny_reasons[r] if { confidential_keyword_found; any_external_domain; r := "Confidential keyword detected; external sharing is blocked." } # UC8
+deny_reasons[r] if { confidential_data_found; any_external_domain; r := "Confidential content detected; external sharing is blocked." } # UC8
 
 allow_reasons[r] if {
   r := "Request satisfies role, recipient, domain, and business-hour controls."
