@@ -147,6 +147,14 @@ button:disabled {
   background: #e0e7ff;
 }
 
+.danger {
+  background: #dc2626;
+}
+
+.danger:hover {
+  background: #b91c1c;
+}
+
 .user-info {
   display: flex;
   flex-direction: column;

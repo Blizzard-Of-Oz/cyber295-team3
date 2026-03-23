@@ -37,9 +37,11 @@ export class McpClientManager {
     }
   }
 
-  async listTools() {
+  async listTools(options = {}) {
     this.log("Fetching tools", { baseUrl: this.baseUrl });
-    const response = await fetch(`${this.baseUrl}/tools`);
+    const response = await fetch(`${this.baseUrl}/tools`, {
+      signal: options.signal
+    });
     if (!response.ok) {
       this.log("Tools request failed", { status: response.status });
       throw new Error(`Failed to list tools: ${response.status}`);
@@ -94,19 +96,30 @@ export class McpClientManager {
           .filter(Boolean)
       : [];
 
-    const response = await fetch(`${this.baseUrl}/call-tool`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        name,
-        arguments: args,
-        context: {
-          userInput: context.userInput || null,
-          correlationId: context.correlationId || null,
-          attachments: contextAttachments
-        }
-      })
-    });
+    let response;
+    try {
+      response = await fetch(`${this.baseUrl}/call-tool`, {
+        method: "POST",
+        headers,
+        signal: context.abortSignal,
+        body: JSON.stringify({
+          name,
+          arguments: args,
+          context: {
+            userInput: context.userInput || null,
+            correlationId: context.correlationId || null,
+            attachments: contextAttachments
+          }
+        })
+      });
+    } catch (error) {
+      if (error?.name === "AbortError" || context.abortSignal?.aborted) {
+        const abortError = new Error("Tool call canceled");
+        abortError.name = "AbortError";
+        throw abortError;
+      }
+      throw error;
+    }
 
     const data = await response.json();
     if (!response.ok || data?.success === false) {

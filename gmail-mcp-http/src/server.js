@@ -77,6 +77,36 @@ function debugLog(message, meta) {
   }
 }
 
+function delayWithAbort(ms, signal) {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  if (signal.aborted) {
+    const error = new Error("Request canceled by client");
+    error.statusCode = 499;
+    error.code = "request_canceled";
+    throw error;
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      const error = new Error("Request canceled by client");
+      error.statusCode = 499;
+      error.code = "request_canceled";
+      reject(error);
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 app.use(express.json({ limit: "1mb" }));
 
 function resolveDefaultMcpCommand() {
@@ -1192,11 +1222,34 @@ app.post("/call-tool", async (req, res) => {
   const startedAt = Date.now();
   const correlationId = getCorrelationId(req);
   res.set("x-correlation-id", correlationId);
+  const requestAbortController = new AbortController();
+  const abortRequest = (eventName) => {
+    if (requestAbortController.signal.aborted) return;
+    requestAbortController.abort();
+    debugLog("Call-tool request aborted by client", {
+      event: eventName,
+      correlationId
+    });
+  };
+  req.once("aborted", () => abortRequest("req.aborted"));
+  res.once("close", () => {
+    if (!res.writableEnded) {
+      abortRequest("res.close");
+    }
+  });
+  const throwIfRequestAborted = () => {
+    if (!requestAbortController.signal.aborted) return;
+    const error = new Error("Request canceled by client");
+    error.statusCode = 499;
+    error.code = "request_canceled";
+    throw error;
+  };
   let auditStatus = "failure";
   let auditSummary = "unknown";
   let auditErrorCode = null;
   let auditErrorMessage = null;
   try {
+    throwIfRequestAborted();
     if (DEBUG) {
       const requestSnapshot = buildHttpRequestSnapshot(req);
       debugLog("Incoming HTTP request", {
@@ -1224,6 +1277,7 @@ app.post("/call-tool", async (req, res) => {
       return res.status(400).json({ error: "name and arguments are required" });
     }
 
+    throwIfRequestAborted();
     // Check rate limit across multiple scopes
     const ip = getRequesterIp(req);
     const userAgent = req.headers["user-agent"] || "unknown";
@@ -1275,6 +1329,7 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
+    throwIfRequestAborted();
     const opaRequest = await buildOpaInput(req, name, normalizedArgs);
     const opaDecision = await callOpaDecision(req, name, normalizedArgs, opaRequest);
     const requesterIp = getRequesterIp(req);
@@ -1358,7 +1413,25 @@ app.post("/call-tool", async (req, res) => {
       });
     }
 
-    const result = await activeMcpClient.callTool(name, normalizedArgs);
+    throwIfRequestAborted();
+    await delayWithAbort(3000, requestAbortController.signal);
+    throwIfRequestAborted();
+    const abortPromise = new Promise((_, reject) => {
+      requestAbortController.signal.addEventListener(
+        "abort",
+        () => {
+          const error = new Error("Request canceled by client");
+          error.statusCode = 499;
+          error.code = "request_canceled";
+          reject(error);
+        },
+        { once: true }
+      );
+    });
+    const result = await Promise.race([
+      activeMcpClient.callTool(name, normalizedArgs),
+      abortPromise
+    ]);
     debugLog("Tool call completed", { name });
 
     const toolError = extractToolError(result);
@@ -1401,6 +1474,47 @@ app.post("/call-tool", async (req, res) => {
 
     res.json({ success: true, result, correlationId, request_id: requestId });
   } catch (error) {
+    if (requestAbortController.signal.aborted) {
+      auditStatus = "user_cancelled";
+      auditErrorCode = "request_canceled";
+      auditErrorMessage = "Request canceled by client";
+      auditSummary = "Request canceled by user";
+      try {
+        const { name, arguments: args } = req.body || {};
+        const rawArgs = args && typeof args === "object" ? { ...args } : {};
+        let argsForAudit = rawArgs;
+        try {
+          argsForAudit = normalizeToolArguments(name, rawArgs);
+        } catch (_normalizeError) {
+          argsForAudit = rawArgs;
+        }
+        const authenticatedUser = getAuthenticatedUser(req);
+        const requesterIp = getRequesterIp(req);
+        const targetUserId = deriveTarget(argsForAudit);
+        activeLogger
+          .recordAction({
+            authenticatedUser,
+            requesterIp,
+            targetUserId,
+            action: name || "unknown",
+            status: auditStatus,
+            durationMs: Date.now() - startedAt,
+            resultSummary: auditSummary,
+            errorCode: auditErrorCode,
+            errorMessage: auditErrorMessage,
+            correlationId
+          })
+          .catch((logError) => {
+            console.warn("Failed to write immuDB log:", logError?.message || logError);
+          });
+      } catch (logError) {
+        console.warn("Failed to build immuDB cancel log payload:", logError?.message || logError);
+      }
+      if (!res.headersSent) {
+        return res.status(499).json({ error: "Request canceled by client", correlationId });
+      }
+      return;
+    }
     auditErrorCode = error?.code || error?.name || "unknown";
     auditErrorMessage = truncateText(error?.message || String(error));
     auditSummary = truncateText(error?.message || "tool call failed", 200);

@@ -1,4 +1,5 @@
 const runButton = document.getElementById("run");
+const stopButton = document.getElementById("stop");
 const requirementInput = document.getElementById("requirement");
 const statusEl = document.getElementById("status");
 const summaryEl = document.getElementById("summary");
@@ -20,6 +21,19 @@ let isAuthenticated = false;
 let csrfToken = "";
 let cachedUser = null;
 let selectedAttachments = [];
+let activeAbortController = null;
+let isRunning = false;
+
+function syncActionButtons() {
+  if (isRunning) {
+    runButton.disabled = true;
+    stopButton.disabled = false;
+    return;
+  }
+
+  stopButton.disabled = true;
+  runButton.disabled = !isAuthenticated;
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -109,14 +123,14 @@ function showAuthPrompt() {
   csrfBanner.style.display = "none";
   authPrompt.style.display = "block";
   userInfo.style.display = "none";
-  runButton.disabled = true;
+  syncActionButtons();
   statusEl.textContent = "Sign in required";
 }
 
 function showApp(user) {
   isAuthenticated = true;
   authPrompt.style.display = "none";
-  runButton.disabled = false;
+  syncActionButtons();
   if (user) {
     userName.textContent = user.name || user.username || "Signed in";
     const emailValue =
@@ -205,6 +219,11 @@ async function checkHealth() {
 }
 
 async function runAgent() {
+  if (isRunning) {
+    statusEl.textContent = "Agent is already running.";
+    return;
+  }
+
   const requirement = requirementInput.value.trim();
   if (!requirement) {
     statusEl.textContent = "Please enter a requirement.";
@@ -225,17 +244,22 @@ async function runAgent() {
     return;
   }
 
+  isRunning = true;
+  activeAbortController = new AbortController();
+  syncActionButtons();
   statusEl.textContent = "Running...";
   summaryEl.textContent = "";
   toolCallsEl.textContent = "";
   toolOutputsEl.textContent = "";
 
+  let wasAborted = false;
   try {
     const attachments = await buildAttachmentPayload();
     const response = await fetch("/api/assist", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-      body: JSON.stringify({ requirement, attachments })
+      body: JSON.stringify({ requirement, attachments }),
+      signal: activeAbortController.signal
     });
 
     const data = await response.json();
@@ -257,10 +281,23 @@ async function runAgent() {
       statusEl.textContent = "Done";
     }
   } catch (error) {
-    statusEl.textContent = error.message || "Error";
-    summaryEl.textContent = "";
+    if (error?.name === "AbortError") {
+      wasAborted = true;
+      statusEl.textContent = "Stopped";
+      summaryEl.textContent = "Request was stopped by user.";
+      toolCallsEl.textContent = "Stopped by user";
+      toolOutputsEl.textContent = "Stopped by user";
+    } else {
+      statusEl.textContent = error.message || "Error";
+      summaryEl.textContent = "";
+    }
   } finally {
-    clearAttachments();
+    isRunning = false;
+    activeAbortController = null;
+    syncActionButtons();
+    if (!wasAborted) {
+      clearAttachments();
+    }
   }
 }
 
@@ -283,6 +320,14 @@ attachmentListEl?.addEventListener("input", (event) => {
 });
 
 runButton.addEventListener("click", runAgent);
+
+stopButton.addEventListener("click", () => {
+  if (!isRunning || !activeAbortController) {
+    return;
+  }
+  statusEl.textContent = "Stopping...";
+  activeAbortController.abort();
+});
 
 signinBtn.addEventListener("click", () => {
   window.location.href = "/auth/signin";
@@ -323,3 +368,4 @@ csrfRetry.addEventListener("click", async () => {
 checkHealth();
 setInterval(checkHealth, 5000);
 setAttachmentsFromFiles(attachmentsInput?.files || []);
+syncActionButtons();

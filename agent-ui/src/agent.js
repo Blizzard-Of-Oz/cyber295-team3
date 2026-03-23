@@ -159,6 +159,18 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
       throw new Error("OPENAI_API_KEY is not set");
     }
 
+    const abortSignal = context?.abortSignal;
+    const throwIfAborted = () => {
+      if (abortSignal?.aborted) {
+        const abortError = new Error("Request canceled");
+        abortError.name = "AbortError";
+        throw abortError;
+      }
+    };
+    const requestOptions = abortSignal ? { signal: abortSignal } : undefined;
+
+    throwIfAborted();
+
     const correlationId = crypto.randomBytes(12).toString("hex");
     context = { ...context, correlationId, userInput: requirement };
 
@@ -169,13 +181,14 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     
     let ragContext = "";
     if (vectorStoreId) {
+      throwIfAborted();
       debugLog("RAG retrieval started", { vectorStoreId, topK, minScore });
       try {
         // Query the vector store
         const searchRes = await openai.vectorStores.search(vectorStoreId, {
           query: requirement,
           max_num_results: topK
-        });
+        }, requestOptions);
 
         // Filter by similarity score and format results
         const hits = (searchRes?.data || [])
@@ -197,6 +210,9 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
           debugLog("RAG retrieval: no chunks met score threshold", { minScore });
         }
       } catch (error) {
+        if (error?.name === "AbortError" || abortSignal?.aborted) {
+          throwIfAborted();
+        }
         debugLog("RAG retrieval failed; continuing without context", { 
           error: error?.message,
           status: error?.status 
@@ -204,7 +220,8 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
       }
     }
 
-    const mcpTools = await mcpClientManager.listTools();
+    throwIfAborted();
+    const mcpTools = await mcpClientManager.listTools({ signal: abortSignal });
     debugLog("Tools loaded for agent", { count: mcpTools.length });
     const tools = mcpTools.map((tool) => ({
       type: "function",
@@ -310,12 +327,13 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
     let stepsRemaining = 7;
 
     while (stepsRemaining > 0) {
+      throwIfAborted();
       response = await openai.chat.completions.create({
         model,
         messages,
         tools,
         tool_choice: "auto"
-      });
+      }, requestOptions);
 
       assistantMessage = response.choices[0]?.message;
       const toolCalls = assistantMessage?.tool_calls || [];
@@ -336,6 +354,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
       });
 
       for (const call of toolCalls) {
+        throwIfAborted();
         const name = call.function?.name;
         const args = call.function?.arguments
           ? JSON.parse(call.function.arguments)
@@ -414,6 +433,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
 
         debugLog("Calling MCP tool", { name });
         try {
+          throwIfAborted();
           const result = await mcpClientManager.callTool(name, args, context);
           debugLog("MCP tool result", { name, ok: true });
           toolOutputs.push({ name, result });
@@ -425,6 +445,9 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
             content: JSON.stringify(result)
           });
         } catch (error) {
+          if (error?.name === "AbortError" || abortSignal?.aborted) {
+            throwIfAborted();
+          }
           const errorInfo = {
             message: error?.message || "Tool call failed",
             reason: error?.reason || null,

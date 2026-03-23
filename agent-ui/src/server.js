@@ -304,6 +304,22 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
   }
 
   let uploaded = { paths: [], metadata: [], cleanup: async () => {} };
+  const requestAbortController = new AbortController();
+  const abortRequest = (eventName) => {
+    if (requestAbortController.signal.aborted) return;
+    requestAbortController.abort();
+    debugLog("Assist request aborted by client", {
+      event: eventName,
+      ip: req.ip,
+      url: req.url
+    });
+  };
+  req.once("aborted", () => abortRequest("req.aborted"));
+  res.once("close", () => {
+    if (!res.writableEnded) {
+      abortRequest("res.close");
+    }
+  });
 
   try {
     uploaded = await materializeRequestAttachments(req);
@@ -333,7 +349,8 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
       requesterIp,
       availableAttachmentPaths,
       availableAttachmentMetadata,
-      generatedAttachmentDir: uploaded.requestDir
+      generatedAttachmentDir: uploaded.requestDir,
+      abortSignal: requestAbortController.signal
     });
     debugLog("Agent run completed", {
       toolCalls: result?.toolCalls?.length || 0,
@@ -345,6 +362,13 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
       attachmentPathsUsed: availableAttachmentPaths
     });
   } catch (error) {
+    if (requestAbortController.signal.aborted) {
+      debugLog("Agent run canceled", { reason: "Client aborted request" });
+      if (!res.headersSent) {
+        return res.status(499).json({ error: "Request canceled by client" });
+      }
+      return;
+    }
     debugLog("Agent run failed", { error: error?.message || error });
     return res.status(500).json({
       error: error?.message || "Unknown error"
