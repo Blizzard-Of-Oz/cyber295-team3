@@ -352,7 +352,7 @@ test_deny_departing_employee_confidential if {
     "context": {
       "recipient_count": 1,
       "recipients": ["personal@gmail.com"],
-      "content_text": "Confidential data",
+      "content_text": "Sensitive data",
       "user_input": "Send data",
       "attachment_bytes": 10000,
       "data_classification": "confidential",
@@ -901,6 +901,60 @@ test_record_count_exactly_100 if {
   result := data.gmail.decision with input as test_input
   not result.allow
   "bulk_customer_export_detected" in result.triggered_controls
+}
+
+# ========== CONFIDENTIAL CONTENT DETECTION FROM OPA REQUEST BODY ==========
+
+test_deny_confidential_ssn_in_request_body_external if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "request": {
+      "body": {
+        "subject": "Regular follow-up",
+        "body": "Employee record includes SSN 123-45-6789 for verification.",
+      },
+    },
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong+allow1@gmail.com"],
+      "content_text": "",
+      "user_input": "Send externally",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+    },
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "confidential_pattern_found" in result.triggered_controls
+  result.reason == "Confidential content detected; external sharing is blocked."
+}
+
+test_deny_confidential_keyword_in_request_subject_external if {
+  test_input := {
+    "requester": {"identity": "team3@billyyaoischoolberkeley.onmicrosoft.com"},
+    "request": {
+      "body": {
+        "subject": "Proprietary launch timeline",
+        "body": "Please review.",
+      },
+    },
+    "context": {
+      "recipient_count": 1,
+      "recipients": ["yaoyaozong+allow1@gmail.com"],
+      "content_text": "",
+      "user_input": "Send externally",
+      "attachment_bytes": 0,
+      "data_classification": "none",
+      "record_count": 0,
+    },
+  }
+
+  result := data.gmail.decision with input as test_input
+  result.decision == "DENY"
+  "confidential_keyword_found" in result.triggered_controls
+  result.reason == "Confidential content detected; external sharing is blocked."
 }
 
 # =========================================================
