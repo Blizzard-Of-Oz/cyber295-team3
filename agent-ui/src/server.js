@@ -335,6 +335,34 @@ app.post("/api/assist/cancel", isAuthenticated, (req, res) => {
   return res.json({ ok: true, requestId });
 });
 
+app.post("/api/assist/cancel-latest", isAuthenticated, (_req, res) => {
+  const requester = _req.session?.account?.username || _req.session?.account?.name || "unknown";
+
+  let latest = null;
+  for (const [requestId, entry] of activeAssistRequests.entries()) {
+    if (entry.authenticatedUser !== requester) continue;
+    if (!latest || entry.createdAt > latest.createdAt) {
+      latest = {
+        requestId,
+        createdAt: entry.createdAt,
+        abortController: entry.abortController
+      };
+    }
+  }
+
+  if (!latest) {
+    return res.status(404).json({ error: "no active request for user" });
+  }
+
+  latest.abortController.abort();
+  infoLog("Assist latest request canceled via API", {
+    requestId: latest.requestId,
+    by: requester
+  });
+
+  return res.json({ ok: true, requestId: latest.requestId });
+});
+
 app.post("/api/assist", isAuthenticated, async (req, res) => {
   const requirement = req.body?.requirement?.trim();
   if (!requirement) {

@@ -338,14 +338,30 @@ stopButton.addEventListener("click", async () => {
   statusEl.textContent = "Stopping...";
 
   const requestId = activeRequestId;
-  if (requestId && csrfToken) {
+  if (csrfToken) {
     try {
-      await fetch("/api/assist/cancel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-        body: JSON.stringify({ requestId }),
-        keepalive: true
-      });
+      if (requestId) {
+        const cancelResponse = await fetch("/api/assist/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          body: JSON.stringify({ requestId }),
+          keepalive: true
+        });
+
+        if (!cancelResponse.ok && cancelResponse.status === 404) {
+          await fetch("/api/assist/cancel-latest", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+            keepalive: true
+          });
+        }
+      } else {
+        await fetch("/api/assist/cancel-latest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          keepalive: true
+        });
+      }
     } catch {
       // Ignore cancellation API failures and still abort local request.
     }
