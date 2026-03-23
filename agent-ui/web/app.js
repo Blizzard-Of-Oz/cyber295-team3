@@ -23,6 +23,14 @@ let cachedUser = null;
 let selectedAttachments = [];
 let activeAbortController = null;
 let isRunning = false;
+let activeRequestId = "";
+
+function createRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
 
 function syncActionButtons() {
   if (isRunning) {
@@ -245,6 +253,7 @@ async function runAgent() {
   }
 
   isRunning = true;
+  activeRequestId = createRequestId();
   activeAbortController = new AbortController();
   syncActionButtons();
   statusEl.textContent = "Running...";
@@ -258,7 +267,7 @@ async function runAgent() {
     const response = await fetch("/api/assist", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-      body: JSON.stringify({ requirement, attachments }),
+      body: JSON.stringify({ requirement, attachments, requestId: activeRequestId }),
       signal: activeAbortController.signal
     });
 
@@ -294,6 +303,7 @@ async function runAgent() {
   } finally {
     isRunning = false;
     activeAbortController = null;
+    activeRequestId = "";
     syncActionButtons();
     if (!wasAborted) {
       clearAttachments();
@@ -321,11 +331,26 @@ attachmentListEl?.addEventListener("input", (event) => {
 
 runButton.addEventListener("click", runAgent);
 
-stopButton.addEventListener("click", () => {
+stopButton.addEventListener("click", async () => {
   if (!isRunning || !activeAbortController) {
     return;
   }
   statusEl.textContent = "Stopping...";
+
+  const requestId = activeRequestId;
+  if (requestId && csrfToken) {
+    try {
+      await fetch("/api/assist/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ requestId }),
+        keepalive: true
+      });
+    } catch {
+      // Ignore cancellation API failures and still abort local request.
+    }
+  }
+
   activeAbortController.abort();
 });
 

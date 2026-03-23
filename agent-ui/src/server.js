@@ -71,6 +71,7 @@ function infoLog(message, meta) {
 
 const mcpClientManager = new McpClientManager();
 const agent = createAgent({ mcpClientManager });
+const activeAssistRequests = new Map();
 
 app.use(express.json({ limit: process.env.REQUEST_JSON_LIMIT || "15mb" }));
 app.use(express.static(path.join(__dirname, "..", "web")));
@@ -309,15 +310,51 @@ app.get("/api/user", isAuthenticated, (req, res) => {
   });
 });
 
+app.post("/api/assist/cancel", isAuthenticated, (req, res) => {
+  const requestId = typeof req.body?.requestId === "string" ? req.body.requestId.trim() : "";
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+
+  const active = activeAssistRequests.get(requestId);
+  if (!active) {
+    return res.status(404).json({ error: "request not found or already finished" });
+  }
+
+  const requester = req.session?.account?.username || req.session?.account?.name || "unknown";
+  if (active.authenticatedUser !== requester) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
+  active.abortController.abort();
+  infoLog("Assist request canceled via API", {
+    requestId,
+    by: requester
+  });
+
+  return res.json({ ok: true, requestId });
+});
+
 app.post("/api/assist", isAuthenticated, async (req, res) => {
   const requirement = req.body?.requirement?.trim();
   if (!requirement) {
     return res.status(400).json({ error: "requirement is required" });
   }
 
-  const assistRequestId = crypto.randomBytes(6).toString("hex");
+  const requestedRequestId =
+    typeof req.body?.requestId === "string" && req.body.requestId.trim().length > 0
+      ? req.body.requestId.trim()
+      : "";
+  const assistRequestId = requestedRequestId || crypto.randomBytes(6).toString("hex");
   let uploaded = { paths: [], metadata: [], cleanup: async () => {} };
   const requestAbortController = new AbortController();
+  const authenticatedUser =
+    req.session?.account?.username || req.session?.account?.name || "unknown";
+  activeAssistRequests.set(assistRequestId, {
+    abortController: requestAbortController,
+    authenticatedUser,
+    createdAt: Date.now()
+  });
   const abortRequest = (eventName) => {
     if (requestAbortController.signal.aborted) return;
     requestAbortController.abort();
@@ -345,8 +382,6 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
     uploaded = await materializeRequestAttachments(req);
     debugLog("Agent run started", { requirementLength: requirement.length });
     const requesterIp = getClientIp(req);
-    const authenticatedUser =
-      req.session?.account?.username || req.session?.account?.name || "unknown";
     const entraToken = req.session?.accessToken || "";
 
     const extraAttachmentPaths = Array.isArray(req.body?.attachmentPaths)
@@ -379,6 +414,7 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
     });
     return res.json({
       ...result,
+      requestId: assistRequestId,
       attachmentPathsUsed: availableAttachmentPaths
     });
   } catch (error) {
@@ -398,6 +434,7 @@ app.post("/api/assist", isAuthenticated, async (req, res) => {
       error: error?.message || "Unknown error"
     });
   } finally {
+    activeAssistRequests.delete(assistRequestId);
     await uploaded.cleanup().catch((cleanupError) => {
       debugLog("Attachment temp cleanup failed", { error: cleanupError?.message || cleanupError });
     });
