@@ -12,11 +12,14 @@
     "@modelcontextprotocol/sdk": "^1.26.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "file-type": "^18.0.0",
     "immudb-node": "^1.0.1",
     "mammoth": "^1.12.0",
     "pdf-parse": "^2.4.5",
     "redis": "^4.6.13",
     "tar": "^7.5.11",
+    "unzipper": "^0.10.14",
+    "xlsx": "^0.18.5",
     "yauzl": "^3.2.1"
   }
 }

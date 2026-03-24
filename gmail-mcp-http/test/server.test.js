@@ -12,6 +12,7 @@ import {
 } from '../src/server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const sharedFixtureDir = path.join(__dirname, '..', '..', 'scripts', 'TestFiles');
 
 function makeRequest(body = {}) {
   return {
@@ -205,6 +206,113 @@ test('buildOpaInput preserves provided attachment extracted_text', async () => {
   assert.equal(extracted.length, 1);
   assert.equal(extracted[0].filename, 'memo.txt');
   assert.equal(extracted[0].extracted_text, 'Already extracted by upstream parser.');
+});
+
+test('buildOpaInput extracts text from real PPTX fixture and aligns detected_types with actual_ext', async () => {
+  const pptxPath = path.join(sharedFixtureDir, 'normal_office365_files.pptx');
+  if (!fs.existsSync(pptxPath)) {
+    return;
+  }
+
+  const req = makeRequest({
+    name: 'send_email',
+    arguments: {
+      to: ['alice@company.com'],
+      subject: 'PPTX fixture test',
+      body: 'Please review the deck.',
+      attachments: [pptxPath]
+    },
+    context: {}
+  });
+
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+  assert.equal(input.context.attachments.length, 1);
+
+  const attachment = input.context.attachments[0];
+  assert.equal(attachment.actual_ext, 'pptx');
+  assert.deepEqual(attachment.detected_types, ['pptx']);
+
+  const extracted = JSON.parse(attachment.extracted_text);
+  assert.equal(Array.isArray(extracted), true);
+  assert.equal(extracted.length, 1);
+  assert.match(extracted[0].extracted_text, /Slide 1:/);
+});
+
+test('buildOpaInput archive contains_file_types reflects detected inner file types', async () => {
+  const zipPath = path.join(sharedFixtureDir, 'spoofing_file_type.exe.txt.zip');
+  if (!fs.existsSync(zipPath)) {
+    return;
+  }
+
+  const req = makeRequest({
+    name: 'send_email',
+    arguments: {
+      to: ['alice@company.com'],
+      subject: 'Archive fixture test',
+      body: 'Please review archive.',
+      attachments: [zipPath]
+    },
+    context: {}
+  });
+
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+  assert.equal(input.context.attachments.length, 1);
+
+  const attachment = input.context.attachments[0];
+  assert.equal(attachment.actual_ext, 'zip');
+  assert.deepEqual(attachment.detected_types, ['zip']);
+  assert.ok(Array.isArray(attachment.archive?.contains_file_types));
+  assert.ok(attachment.archive.contains_file_types.length > 0);
+  assert.equal(attachment.archive.contains_file_types.includes('exe'), true);
+  assert.equal(attachment.archive.contains_file_types.includes('zip'), false);
+});
+
+test('buildOpaInput skips text extraction for unsupported executable fixture', async () => {
+  const exePath = path.join(sharedFixtureDir, 'spoofing_file_type.exe.txt');
+  if (!fs.existsSync(exePath)) {
+    return;
+  }
+
+  const req = makeRequest({
+    name: 'send_email',
+    arguments: {
+      to: ['alice@company.com'],
+      subject: 'Executable fixture test',
+      body: 'Please review executable.',
+      attachments: [exePath]
+    },
+    context: {}
+  });
+
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+  assert.equal(input.context.attachments.length, 1);
+  const attachment = input.context.attachments[0];
+  assert.equal(attachment.actual_ext, 'exe');
+  assert.equal(attachment.extracted_text, undefined);
+});
+
+test('buildOpaInput marks password-protected ZIP archive metadata correctly', async () => {
+  const zipPath = path.join(sharedFixtureDir, 'password_protected.zip');
+  if (!fs.existsSync(zipPath)) {
+    return;
+  }
+
+  const req = makeRequest({
+    name: 'send_email',
+    arguments: {
+      to: ['alice@company.com'],
+      subject: 'Password archive fixture test',
+      body: 'Please review protected archive.',
+      attachments: [zipPath]
+    },
+    context: {}
+  });
+
+  const input = await buildOpaInput(req, 'send_email', req.body.arguments);
+  assert.equal(input.context.attachments.length, 1);
+  const attachment = input.context.attachments[0];
+  assert.equal(attachment.actual_ext, 'zip');
+  assert.equal(attachment.archive?.password_protected, true);
 });
 
 test('buildOpaInput extracts image text via LLM OCR when enabled', async () => {

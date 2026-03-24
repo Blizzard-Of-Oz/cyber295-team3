@@ -15,6 +15,13 @@ import { ImmuDBLogger } from "./immudb-logger.js";
 import { createDemoRouter } from "./demo.js";
 import { DemoRequestIdGenerator, AccountLockManager } from "./demo-utils.js";
 import { RateLimiter, parseRateLimitConfig } from "./rate-limiter.js";
+import {
+  FileTypeDetector,
+  AttachmentMetadata,
+  TextExtractor,
+  ArchiveInspector,
+  ATTACHMENT_CONFIG
+} from "./attachments.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -26,48 +33,21 @@ const OPA_DECISION_URL =
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
 const ENABLE_DEMO_ROUTES = process.env.ENABLE_DEMO_ROUTES !== "false";
-const DEFAULT_ATTACHMENT_SANDBOX_ROOT = path.join(os.tmpdir(), "agent-ui-attachments");
-const ATTACHMENT_SANDBOX_ROOT = path.resolve(
-  process.env.ATTACHMENT_SANDBOX_ROOT || DEFAULT_ATTACHMENT_SANDBOX_ROOT
-);
-const ATTACHMENT_TEXT_MAX_BYTES = process.env.ATTACHMENT_TEXT_MAX_BYTES
-  ? Number(process.env.ATTACHMENT_TEXT_MAX_BYTES)
-  : 262144;
-const ATTACHMENT_TEXT_MAX_CHARS = process.env.ATTACHMENT_TEXT_MAX_CHARS
-  ? Number(process.env.ATTACHMENT_TEXT_MAX_CHARS)
-  : 8000;
-const ATTACHMENT_IMAGE_OCR_MODEL_DEFAULT = "gpt-4.1-mini";
-const ATTACHMENT_IMAGE_OCR_TIMEOUT_MS_DEFAULT = 10000;
-const ATTACHMENT_IMAGE_MAX_BYTES_DEFAULT = 5 * 1024 * 1024;
-const ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES = process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES
-  ? Number(process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES)
-  : 50;
-const ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES = process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES
-  ? Number(process.env.ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES)
-  : 262144;
-const OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1";
-const TEXT_ATTACHMENT_EXTENSIONS = new Set([
-  "txt",
-  "md",
-  "json",
-  "csv",
-  "log",
-  "xml",
-  "html",
-  "htm",
-  "yaml",
-  "yml",
-  "ini",
-  "cfg",
-  "conf",
-  "tsv",
-  "sql",
-  "rtf"
-]);
-const IMAGE_ATTACHMENT_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"]);
-const ATTACHMENT_SANDBOX_SOURCE = process.env.ATTACHMENT_SANDBOX_ROOT
-      ? "ATTACHMENT_SANDBOX_ROOT"
-    : "default";
+const ATTACHMENT_SANDBOX_ROOT = (() => {
+  const fallback = path.resolve(path.join(os.tmpdir(), "agent-ui-attachments"));
+  const configured = process.env.ATTACHMENT_SANDBOX_ROOT;
+  if (typeof configured !== "string" || !configured.trim()) {
+    return fallback;
+  }
+
+  const candidate = path.resolve(configured.trim());
+  try {
+    const stat = fs.statSync(candidate);
+    return stat.isDirectory() ? candidate : fallback;
+  } catch (_error) {
+    return fallback;
+  }
+})();
 const SENSITIVE_HEADER_NAMES = [
   "authorization",
   "x-entra-token",
@@ -534,836 +514,21 @@ function enforceAttachmentSandbox(paths = []) {
   };
 }
 
-function fileExtension(value) {
-  if (typeof value !== "string" || value.trim() === "") return "";
-  const ext = path.extname(value).toLowerCase();
-  return ext.startsWith(".") ? ext.slice(1) : ext;
-}
-
-function isArchiveExtension(ext = "") {
-  return ["zip", "7z", "rar", "tar", "tgz", "gz", "bz2", "xz"].includes(lower(ext));
-}
-
-function lower(value) {
-  return typeof value === "string" ? value.toLowerCase() : "";
-}
-
-function toFixedNumber(value, digits = 4) {
-  if (!Number.isFinite(value)) return null;
-  return Number(value.toFixed(digits));
-}
-
-function buildArchiveMetadata({ containsFileTypes = [], fileCount = 0, passwordProtected = false, compressionRatio = null } = {}) {
-  return {
-    contains_file_types: unique(containsFileTypes.map((ext) => lower(ext)).filter(Boolean)).sort(),
-    file_count: Number.isFinite(fileCount) ? fileCount : 0,
-    password_protected: Boolean(passwordProtected),
-    compression_ratio: compressionRatio
-  };
-}
-
-async function inspectZipArchive(filePath) {
-  return new Promise((resolve) => {
-    yauzl.open(filePath, { lazyEntries: true, autoClose: true }, (openError, zipFile) => {
-      if (openError || !zipFile) {
-        resolve(null);
-        return;
-      }
-
-      let fileCount = 0;
-      let totalCompressedBytes = 0;
-      let totalUncompressedBytes = 0;
-      let passwordProtected = false;
-      const containsFileTypes = [];
-
-      zipFile.on("entry", (entry) => {
-        if (!entry || /\/$/.test(entry.fileName || "")) {
-          zipFile.readEntry();
-          return;
-        }
-
-        fileCount += 1;
-        totalCompressedBytes += Number(entry.compressedSize || 0);
-        totalUncompressedBytes += Number(entry.uncompressedSize || 0);
-
-        const entryExt = fileExtension(path.basename(entry.fileName || ""));
-        if (entryExt) {
-          containsFileTypes.push(entryExt);
-        }
-
-        if ((entry.generalPurposeBitFlag & 0x1) === 0x1) {
-          passwordProtected = true;
-        }
-
-        zipFile.readEntry();
-      });
-
-      zipFile.on("end", () => {
-        const compressionRatio =
-          totalCompressedBytes > 0 ? toFixedNumber(totalUncompressedBytes / totalCompressedBytes) : null;
-        resolve(
-          buildArchiveMetadata({
-            containsFileTypes,
-            fileCount,
-            passwordProtected,
-            compressionRatio
-          })
-        );
-      });
-
-      zipFile.on("error", () => resolve(null));
-      zipFile.readEntry();
-    });
-  });
-}
-
-function isTarLikeArchive(filePath, ext) {
-  const normalizedPath = lower(filePath);
-  if (ext === "tar" || ext === "tgz") return true;
-  if (normalizedPath.endsWith(".tar.gz") || normalizedPath.endsWith(".tar.bz2") || normalizedPath.endsWith(".tar.xz")) {
-    return true;
-  }
-  return false;
-}
-
-async function inspectTarArchive(filePath, archiveSizeBytes) {
-  let fileCount = 0;
-  let totalUncompressedBytes = 0;
-  const containsFileTypes = [];
-
-  try {
-    await tar.t({
-      file: filePath,
-      onentry: (entry) => {
-        if (!entry || entry.type !== "File") return;
-        fileCount += 1;
-        totalUncompressedBytes += Number(entry.size || 0);
-        const entryExt = fileExtension(path.basename(entry.path || ""));
-        if (entryExt) {
-          containsFileTypes.push(entryExt);
-        }
-      }
-    });
-
-    const compressionRatio =
-      archiveSizeBytes > 0 ? toFixedNumber(totalUncompressedBytes / archiveSizeBytes) : null;
-    return buildArchiveMetadata({
-      containsFileTypes,
-      fileCount,
-      passwordProtected: false,
-      compressionRatio
-    });
-  } catch (_error) {
-    return null;
-  }
-}
-
-async function inspectArchiveMetadata(filePath, ext, archiveSizeBytes) {
-  if (!filePath || !ext || !isArchiveExtension(ext)) return null;
-
-  if (ext === "zip") {
-    return inspectZipArchive(filePath);
-  }
-
-  if (isTarLikeArchive(filePath, ext)) {
-    return inspectTarArchive(filePath, archiveSizeBytes);
-  }
-
-  return null;
-}
-
-function summarizeArchiveMetadata(attachments = []) {
-  const archiveItems = attachments
-    .map((attachment) => attachment?.archive)
-    .filter((archive) => archive && typeof archive === "object");
-
-  if (archiveItems.length === 0) {
-    return {
-      contains_file_types: [],
-      file_count: 0,
-      password_protected: false,
-      compression_ratio: null
-    };
-  }
-
-  const containsFileTypes = unique(
-    archiveItems
-      .flatMap((archive) => (Array.isArray(archive.contains_file_types) ? archive.contains_file_types : []))
-      .map((ext) => lower(ext))
-      .filter(Boolean)
-  ).sort();
-
-  const fileCount = archiveItems.reduce((sum, archive) => sum + Number(archive.file_count || 0), 0);
-  const passwordProtected = archiveItems.some((archive) => Boolean(archive.password_protected));
-  const compressionRatios = archiveItems
-    .map((archive) => Number(archive.compression_ratio))
-    .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
-  const compressionRatio =
-    compressionRatios.length > 0
-      ? toFixedNumber(compressionRatios.reduce((sum, ratio) => sum + ratio, 0) / compressionRatios.length)
-      : null;
-
-  return {
-    contains_file_types: containsFileTypes,
-    file_count: fileCount,
-    password_protected: passwordProtected,
-    compression_ratio: compressionRatio
-  };
-}
-
-function sanitizeExtractedText(value) {
-  if (typeof value !== "string") return "";
-  return value
-    .replace(/\u0000/g, "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .trim();
-}
-
-function normalizeExtractedTextJson(filename, extractedText) {
-  const cleanedText = trimExtractedText(sanitizeExtractedText(extractedText));
-  if (!cleanedText) return null;
-  const safeFilename =
-    (typeof filename === "string" && filename.trim())
-      ? filename.trim()
-      : "unknown";
-  return JSON.stringify([
-    {
-      filename: safeFilename,
-      extracted_text: cleanedText
-    }
-  ]);
-}
-
-function isExtractedTextJsonArray(value) {
-  if (typeof value !== "string" || !value.trim()) return false;
-  try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.length === 0) return false;
-    return parsed.every((entry) =>
-      entry && typeof entry === "object" &&
-      typeof entry.filename === "string" &&
-      typeof entry.extracted_text === "string"
-    );
-  } catch (_error) {
-    return false;
-  }
-}
-
-function trimExtractedText(value, maxChars = ATTACHMENT_TEXT_MAX_CHARS) {
-  if (typeof value !== "string") return "";
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}...`;
-}
-
-function looksBinaryBuffer(buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return false;
-  const sampleSize = Math.min(buffer.length, 4096);
-  let suspicious = 0;
-
-  for (let i = 0; i < sampleSize; i += 1) {
-    const byte = buffer[i];
-    if (byte === 0) {
-      suspicious += 1;
-      continue;
-    }
-
-    const isPrintableAscii = byte >= 32 && byte <= 126;
-    const isWhitespace = byte === 9 || byte === 10 || byte === 13;
-    const isExtendedLatin = byte >= 160;
-    if (!isPrintableAscii && !isWhitespace && !isExtendedLatin) {
-      suspicious += 1;
-    }
-  }
-
-  return suspicious / sampleSize > 0.3;
-}
-
-function extractPrintableStrings(buffer, minLength = 4) {
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return "";
-  const strings = [];
-  let current = "";
-
-  for (const byte of buffer) {
-    const isPrintableAscii = byte >= 32 && byte <= 126;
-    const isWhitespace = byte === 9 || byte === 10 || byte === 13;
-
-    if (isPrintableAscii || isWhitespace) {
-      current += String.fromCharCode(byte);
-    } else {
-      if (current.length >= minLength) {
-        strings.push(current.trim());
-      }
-      current = "";
-    }
-  }
-
-  if (current.length >= minLength) {
-    strings.push(current.trim());
-  }
-
-  return strings.join("\n");
-}
-
-function mimeTypeForImageExtension(ext) {
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    case "bmp":
-      return "image/bmp";
-    case "tif":
-    case "tiff":
-      return "image/tiff";
-    default:
-      return "application/octet-stream";
-  }
-}
-
-function imageOcrEnabled() {
-  return process.env.ATTACHMENT_IMAGE_OCR_WITH_LLM === "true";
-}
-
-function imageOcrModel() {
-  return process.env.ATTACHMENT_IMAGE_OCR_MODEL || ATTACHMENT_IMAGE_OCR_MODEL_DEFAULT;
-}
-
-function imageOcrTimeoutMs() {
-  const configured = Number(process.env.ATTACHMENT_IMAGE_OCR_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : ATTACHMENT_IMAGE_OCR_TIMEOUT_MS_DEFAULT;
-}
-
-function imageOcrMaxBytes() {
-  const configured = Number(process.env.ATTACHMENT_IMAGE_MAX_BYTES);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : ATTACHMENT_IMAGE_MAX_BYTES_DEFAULT;
-}
-
-function openAiBaseUrl() {
-  return process.env.OPENAI_BASE_URL || OPENAI_BASE_URL_DEFAULT;
-}
-
-function openAiApiKey() {
-  return process.env.OPENAI_API_KEY || "";
-}
-
-async function extractImageTextWithLlm(ext, buffer) {
-  if (!imageOcrEnabled()) {
-    debugLog("Image OCR skipped: ATTACHMENT_IMAGE_OCR_WITH_LLM is disabled", { ext });
-    return null;
-  }
-  const apiKey = openAiApiKey();
-  if (!apiKey) {
-    debugLog("Image OCR skipped: OPENAI_API_KEY is missing", { ext });
-    return null;
-  }
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-  if (!IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) return null;
-  const maxBytes = imageOcrMaxBytes();
-  if (buffer.length > maxBytes) {
-    debugLog("Image OCR skipped: attachment exceeds ATTACHMENT_IMAGE_MAX_BYTES", {
-      ext,
-      size_bytes: buffer.length,
-      max_bytes: maxBytes
-    });
-    return null;
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), imageOcrTimeoutMs());
-
-  try {
-    debugLog("Image OCR request started", {
-      ext,
-      size_bytes: buffer.length,
-      model: imageOcrModel()
-    });
-    const mimeType = mimeTypeForImageExtension(ext);
-    const base64Image = buffer.toString("base64");
-    const dataUrl = `data:${mimeType};base64,${base64Image}`;
-
-    const response = await fetch(`${openAiBaseUrl()}/responses`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: imageOcrModel(),
-        store: false,
-        input: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: "Extract all visible text from this image. Return plain text only."
-              },
-              {
-                type: "input_image",
-                image_url: dataUrl
-              }
-            ]
-          }
-        ]
-      }),
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      debugLog("Image OCR request failed", { ext, status: response.status });
-      return null;
-    }
-    const payload = await response.json().catch(() => null);
-    if (!payload || typeof payload !== "object") return null;
-
-    const responseText = extractResponsesApiText(payload);
-    const normalized = trimExtractedText(sanitizeExtractedText(responseText));
-    debugLog("Image OCR request completed", {
-      ext,
-      extracted_chars: normalized.length
-    });
-    return normalized || null;
-  } catch (_error) {
-    debugLog("Image OCR request threw error", { ext });
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-function extractResponsesApiText(payload) {
-  if (!payload || typeof payload !== "object") return "";
-
-  if (typeof payload.output_text === "string" && payload.output_text.trim()) {
-    return payload.output_text;
-  }
-
-  const outputItems = Array.isArray(payload.output) ? payload.output : [];
-  const chunks = [];
-
-  for (const item of outputItems) {
-    const contentItems = Array.isArray(item?.content) ? item.content : [];
-    for (const content of contentItems) {
-      if (content?.type === "output_text" && typeof content.text === "string" && content.text.trim()) {
-        chunks.push(content.text);
-      }
-    }
-  }
-
-  return chunks.join("\n");
-}
-
-async function extractStructuredTextByFormat(ext, buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-
-  if (ext === "pdf") {
-    let parser = null;
-    try {
-      parser = new PDFParse({ data: buffer });
-      const parsed = await parser.getText();
-      const normalized = trimExtractedText(sanitizeExtractedText(parsed?.text || ""));
-      return normalized || null;
-    } catch (_error) {
-      return null;
-    } finally {
-      if (parser) {
-        try {
-          await parser.destroy();
-        } catch (_destroyError) {
-          // Ignore parser teardown failures.
-        }
-      }
-    }
-  }
-
-  if (ext === "docx") {
-    try {
-      const parsed = await mammoth.extractRawText({ buffer });
-      const normalized = trimExtractedText(sanitizeExtractedText(parsed?.value || ""));
-      return normalized || null;
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) {
-    return extractImageTextWithLlm(ext, buffer);
-  }
-
-  return null;
-}
-
-async function extractTextFromBufferBestEffort({ ext, buffer, sourceName = null }) {
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-
-  const structuredText = await extractStructuredTextByFormat(ext, buffer);
-  if (structuredText) {
-    debugLog("Attachment text extracted via structured parser", {
-      name: sourceName,
-      ext,
-      extracted_chars: structuredText.length
-    });
-    return structuredText;
-  }
-
-  if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) {
-    debugLog("Attachment text extraction ended without text for image", {
-      name: sourceName,
-      ext
-    });
-    return null;
-  }
-
-  if (TEXT_ATTACHMENT_EXTENSIONS.has(ext)) {
-    const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
-    if (normalized) {
-      debugLog("Attachment text extracted via UTF-8 text decode", {
-        name: sourceName,
-        ext,
-        extracted_chars: normalized.length
-      });
-    }
-    return normalized || null;
-  }
-
-  if (ext === "pdf") {
-    const printable = trimExtractedText(sanitizeExtractedText(extractPrintableStrings(buffer)));
-    return printable || null;
-  }
-
-  if (!looksBinaryBuffer(buffer)) {
-    const normalized = trimExtractedText(sanitizeExtractedText(buffer.toString("utf8")));
-    if (normalized) {
-      debugLog("Attachment text extracted via binary-safe UTF-8 fallback", {
-        name: sourceName,
-        ext,
-        extracted_chars: normalized.length
-      });
-    }
-    return normalized || null;
-  }
-
-  debugLog("Attachment text extraction found no usable text", {
-    name: sourceName,
-    ext
-  });
-  return null;
-}
-
-function readZipEntryBuffer(zipFile, entry, maxBytes = ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES) {
-  return new Promise((resolve) => {
-    zipFile.openReadStream(entry, (streamError, stream) => {
-      if (streamError || !stream) {
-        resolve(null);
-        return;
-      }
-
-      const chunks = [];
-      let total = 0;
-      let exceeded = false;
-
-      stream.on("data", (chunk) => {
-        if (exceeded || !Buffer.isBuffer(chunk)) return;
-        total += chunk.length;
-        if (total > maxBytes) {
-          exceeded = true;
-          stream.destroy();
-          return;
-        }
-        chunks.push(chunk);
-      });
-
-      stream.on("error", () => resolve(null));
-      stream.on("close", () => {
-        if (exceeded) {
-          resolve(null);
-          return;
-        }
-        resolve(Buffer.concat(chunks));
-      });
-      stream.on("end", () => {
-        if (!exceeded) {
-          resolve(Buffer.concat(chunks));
-        }
-      });
-    });
-  });
-}
-
-async function extractZipArchiveEntryTexts(filePath) {
-  return new Promise((resolve) => {
-    yauzl.open(filePath, { lazyEntries: true, autoClose: true }, (openError, zipFile) => {
-      if (openError || !zipFile) {
-        resolve([]);
-        return;
-      }
-
-      const entries = [];
-      let inspectedFiles = 0;
-      let finished = false;
-
-      const done = () => {
-        if (finished) return;
-        finished = true;
-        resolve(entries);
-      };
-
-      zipFile.on("error", () => done());
-      zipFile.on("end", () => done());
-
-      zipFile.on("entry", async (entry) => {
-        if (!entry || /\/$/.test(entry.fileName || "")) {
-          zipFile.readEntry();
-          return;
-        }
-
-        if (inspectedFiles >= ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES) {
-          done();
-          return;
-        }
-        inspectedFiles += 1;
-
-        const entryName = entry.fileName;
-        const entryExt = fileExtension(path.basename(entryName));
-        const entryBuffer = await readZipEntryBuffer(zipFile, entry, ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES);
-        if (entryBuffer && entryBuffer.length > 0) {
-          const extracted = await extractTextFromBufferBestEffort({
-            ext: entryExt,
-            buffer: entryBuffer,
-            sourceName: entryName
-          });
-          if (extracted) {
-            entries.push({
-              filename: entryName,
-              extracted_text: extracted
-            });
-          }
-        }
-
-        zipFile.readEntry();
-      });
-
-      zipFile.readEntry();
-    });
-  });
-}
-
-async function extractTarArchiveEntryTexts(filePath) {
-  const entries = [];
-  let inspectedFiles = 0;
-
-  try {
-    await tar.t({
-      file: filePath,
-      onentry: (entry) => {
-        if (!entry || entry.type !== "File") return;
-        if (inspectedFiles >= ATTACHMENT_ARCHIVE_ENTRY_MAX_FILES) {
-          entry.resume();
-          return;
-        }
-        inspectedFiles += 1;
-
-        const chunks = [];
-        let total = 0;
-        let exceeded = false;
-
-        entry.on("data", (chunk) => {
-          if (exceeded || !Buffer.isBuffer(chunk)) return;
-          total += chunk.length;
-          if (total > ATTACHMENT_ARCHIVE_ENTRY_MAX_BYTES) {
-            exceeded = true;
-            return;
-          }
-          chunks.push(chunk);
-        });
-
-        entry.on("end", async () => {
-          if (exceeded) return;
-          const entryBuffer = Buffer.concat(chunks);
-          const entryName = entry.path || "unknown";
-          const entryExt = fileExtension(path.basename(entryName));
-          const extracted = await extractTextFromBufferBestEffort({
-            ext: entryExt,
-            buffer: entryBuffer,
-            sourceName: entryName
-          });
-          if (extracted) {
-            entries.push({
-              filename: entryName,
-              extracted_text: extracted
-            });
-          }
-        });
-      }
-    });
-  } catch (_error) {
-    return [];
-  }
-
-  return entries;
-}
-
-async function extractArchiveEntryTexts(filePath, ext) {
-  if (!filePath || !ext || !isArchiveExtension(ext)) return [];
-  if (ext === "zip") {
-    return extractZipArchiveEntryTexts(filePath);
-  }
-  if (isTarLikeArchive(filePath, ext)) {
-    return extractTarArchiveEntryTexts(filePath);
-  }
-  return [];
-}
-
-async function extractAttachmentTextBestEffort(attachment = {}) {
-  if (!attachment || typeof attachment !== "object") return null;
-  if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) {
-    debugLog("Attachment text extraction skipped: extracted_text already provided", {
-      name: attachment.name || null
-    });
-    return trimExtractedText(sanitizeExtractedText(attachment.extracted_text));
-  }
-  if (typeof attachment.path !== "string" || !attachment.path.trim()) return null;
-
-  try {
-    const stat = fs.statSync(attachment.path);
-    if (!stat.isFile()) return null;
-    if (!Number.isFinite(ATTACHMENT_TEXT_MAX_BYTES) || ATTACHMENT_TEXT_MAX_BYTES <= 0) return null;
-    if (stat.size <= 0 || stat.size > ATTACHMENT_TEXT_MAX_BYTES) {
-      debugLog("Attachment text extraction skipped due to size limits", {
-        name: attachment.name || path.basename(attachment.path),
-        size_bytes: stat.size,
-        max_bytes: ATTACHMENT_TEXT_MAX_BYTES
-      });
-      return null;
-    }
-
-    const buffer = await fs.promises.readFile(attachment.path);
-    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.path));
-    return extractTextFromBufferBestEffort({
-      ext,
-      buffer,
-      sourceName: attachment.name || path.basename(attachment.path)
-    });
-  } catch (_error) {
-    debugLog("Attachment text extraction failed", {
-      name: attachment.name || null,
-      path: attachment.path || null
-    });
-    return null;
-  }
-}
-
-function normalizeAttachmentPaths(args) {
-  const raw = [];
-
-  if (Array.isArray(args?.attachments)) {
-    raw.push(...args.attachments);
-  }
-
-  if (typeof args?.attachmentPath === "string") {
-    raw.push(args.attachmentPath);
-  }
-
-  if (typeof args?.attachment_path === "string") {
-    raw.push(args.attachment_path);
-  }
-
-  return raw
-    .map((value) => (typeof value === "string" ? value.trim() : ""))
-    .filter(Boolean);
-}
-
-function deriveAttachmentMetadata(args) {
-  const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
-  const explicitName = args?.attachmentName || args?.attachment_name || null;
-  const paths = normalizeAttachmentPaths(args);
-
-  if (paths.length === 0) {
-    return {
-      attachmentBytes: explicitBytes,
-      attachmentName: explicitName,
-      attachmentCount: 0
-    };
-  }
-
-  let totalBytes = 0;
-  const names = [];
-
-  for (const filePath of paths) {
-    try {
-      const stat = fs.statSync(filePath);
-      if (stat.isFile()) {
-        totalBytes += stat.size;
-        names.push(path.basename(filePath));
-      }
-    } catch (_error) {
-      // Ignore inaccessible attachment paths; Gmail tool will return explicit send errors.
-    }
-  }
-
-  const mergedBytes = explicitBytes > 0 ? explicitBytes : totalBytes;
-  const mergedName = explicitName || (names.length > 0 ? names.join(",") : null);
-
-  return {
-    attachmentBytes: mergedBytes,
-    attachmentName: mergedName,
-    attachmentCount: paths.length
-  };
-}
-
-function normalizeProvidedAttachments(value) {
-  if (!Array.isArray(value)) return [];
-
-  return value
-    .map((entry) => {
-      if (typeof entry === "string") {
-        const trimmed = entry.trim();
-        if (!trimmed) return null;
-        const name = path.basename(trimmed);
-        const ext = fileExtension(name);
-        return {
-          path: trimmed,
-          name,
-          file_ext: ext,
-          actual_ext: ext,
-          detected_types: ext ? [ext] : []
-        };
-      }
-
-      if (entry && typeof entry === "object") {
-        const normalized = { ...entry };
-        const name = normalized.name || normalized.filename || normalized.file_name;
-        const ext = fileExtension(name || normalized.path || "");
-
-        if (name && !normalized.name) normalized.name = name;
-        if (!normalized.file_ext && ext) normalized.file_ext = ext;
-        if (!normalized.actual_ext && normalized.file_ext) normalized.actual_ext = normalized.file_ext;
-        if (!Array.isArray(normalized.detected_types) && normalized.file_ext) {
-          normalized.detected_types = [normalized.file_ext];
-        }
-
-        return normalized;
-      }
-
-      return null;
-    })
-    .filter(Boolean);
-}
-
+/**
+ * NEW: Simplified deriveContextAttachments using the new attachments module
+ * Processes attachments with magic byte detection and proper text extraction
+ */
 async function deriveContextAttachments(req, args) {
-  const provided = normalizeProvidedAttachments(req.body?.context?.attachments);
-  const paths = unique(normalizeAttachmentPaths(args));
+  const metadataUtils = AttachmentMetadata;
+  const fileTypeDetector = new FileTypeDetector(ATTACHMENT_SANDBOX_ROOT, debugLog);
+  const textExtractor = new TextExtractor(debugLog);
+  const archiveInspector = new ArchiveInspector(debugLog);
 
+  // Normalize attachments from multiple sources
+  const provided = metadataUtils.normalizeProvidedAttachments(req.body?.context?.attachments);
+  const paths = unique(metadataUtils.normalizeAttachmentPaths(args));
+
+  // Build derived attachment metadata
   const derived = paths.map((filePath) => {
     const name = path.basename(filePath);
     const ext = fileExtension(name);
@@ -1375,7 +540,7 @@ async function deriveContextAttachments(req, args) {
         sizeBytes = stat.size;
       }
     } catch (_error) {
-      // Keep attachment metadata even when file is inaccessible.
+      // Keep attachment metadata even when file is inaccessible
     }
 
     return {
@@ -1388,6 +553,7 @@ async function deriveContextAttachments(req, args) {
     };
   });
 
+  // Add explicit attachment if provided
   const explicitName = args?.attachmentName || args?.attachment_name;
   const explicitBytes = Number(args?.attachmentBytes || args?.attachment_bytes || 0);
   if (derived.length === 0 && typeof explicitName === "string" && explicitName.trim()) {
@@ -1402,6 +568,7 @@ async function deriveContextAttachments(req, args) {
     });
   }
 
+  // Merge and deduplicate
   const merged = [...provided, ...derived];
   const deduped = [];
   const seen = new Set();
@@ -1415,13 +582,73 @@ async function deriveContextAttachments(req, args) {
     deduped.push(attachment);
   }
 
+  // Detect file types using magic bytes
   for (const attachment of deduped) {
-    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || ""));
-    if (!isArchiveExtension(ext)) continue;
+    if (!attachment.path || typeof attachment.path !== "string") continue;
+
+    try {
+      const buffer = await fs.promises.readFile(attachment.path);
+      const detection = await fileTypeDetector.detectFromBuffer(buffer);
+      const fallbackExt = attachment.file_ext || fileExtension(attachment.path);
+      const bestExt = await fileTypeDetector.detectBestExtension(buffer, fallbackExt);
+
+      debugLog("Attachment file type detection result", {
+        name: attachment.name || path.basename(attachment.path),
+        path: attachment.path,
+        detected_ext: detection.ext || null,
+        detected_mime: detection.mime || null,
+        detection_source: detection.source,
+        original_ext: attachment.file_ext || null
+      });
+      
+      attachment.detected_ext = bestExt || detection.ext || null;
+      attachment.actual_ext = bestExt || attachment.file_ext || null;
+
+      if (detection.ext === "zip") {
+        debugLog("Attachment ZIP type refinement result", {
+          name: attachment.name || path.basename(attachment.path),
+          path: attachment.path,
+          refined_ext: bestExt,
+          original_ext: attachment.file_ext || null
+        });
+      }
+
+      debugLog("Attachment final type selected", {
+        name: attachment.name || path.basename(attachment.path),
+        path: attachment.path,
+        final_ext: attachment.actual_ext || attachment.file_ext || null,
+        detected_ext: attachment.detected_ext || null,
+        original_ext: attachment.file_ext || null
+      });
+    } catch (_error) {
+      // Keep original extension on error
+      debugLog("Attachment file type detection failed, keeping original extension", {
+        name: attachment.name || path.basename(attachment.path),
+        path: attachment.path,
+        original_ext: attachment.file_ext || null
+      });
+    }
+
+    const normalizedActualExt = attachment.actual_ext || attachment.file_ext || null;
+    attachment.detected_types = normalizedActualExt ? [normalizedActualExt] : [];
+  }
+
+  for (const attachment of deduped) {
+    if (!attachment.actual_ext && attachment.file_ext) {
+      attachment.actual_ext = attachment.file_ext;
+    }
+    const normalizedActualExt = attachment.actual_ext || null;
+    attachment.detected_types = normalizedActualExt ? [normalizedActualExt] : [];
+  }
+
+  // Inspect archive metadata
+  for (const attachment of deduped) {
+    const ext = attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || "");
+    if (!ATTACHMENT_CONFIG.ARCHIVE_EXTENSIONS.includes(ext)) continue;
     if (attachment.archive && typeof attachment.archive === "object") continue;
     if (!attachment.path || typeof attachment.path !== "string") continue;
 
-    const archive = await inspectArchiveMetadata(
+    const archive = await archiveInspector.inspectMetadata(
       attachment.path,
       ext,
       Number(attachment.size_bytes || 0)
@@ -1432,51 +659,53 @@ async function deriveContextAttachments(req, args) {
     }
   }
 
+  // Extract archive entry texts
   for (const attachment of deduped) {
-    const ext = lower(attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || ""));
-    if (!isArchiveExtension(ext)) continue;
+    const ext = attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || "");
+    if (!ATTACHMENT_CONFIG.ARCHIVE_EXTENSIONS.includes(ext)) continue;
     if (!attachment.path || typeof attachment.path !== "string") continue;
 
-    const entryTexts = await extractArchiveEntryTexts(attachment.path, ext);
+    const entryTexts = await archiveInspector.extractEntryTexts(attachment.path, ext);
     if (entryTexts.length > 0) {
       const jsonText = JSON.stringify(entryTexts);
-      const normalized = trimExtractedText(sanitizeExtractedText(jsonText));
-      if (normalized) {
-        attachment.extracted_text = normalized;
-        debugLog("Archive attachment text extracted from entries", {
-          name: attachment.name || path.basename(attachment.path),
-          ext,
-          entry_count_with_text: entryTexts.length,
-          extracted_chars: normalized.length
-        });
+      attachment.extracted_text = jsonText;
+      debugLog("Archive attachment text extracted from entries", {
+        name: attachment.name || path.basename(attachment.path),
+        ext,
+        entry_count_with_text: entryTexts.length,
+        extracted_chars: jsonText.length
+      });
+    }
+  }
+
+  // Extract regular attachment text
+  for (const attachment of deduped) {
+    let extracted = attachment.extracted_text;
+    
+    // Skip extraction if already extracted
+    if (typeof extracted === "string" && extracted.trim()) {
+      // Try to parse as JSON; if it fails, wrap it
+      try {
+        JSON.parse(extracted);
+        // Already valid JSON, keep as is
+        continue;
+      } catch (_err) {
+        // Not valid JSON, wrap it in the expected format
+        attachment.extracted_text = JSON.stringify([
+          { filename: attachment.name || "attachment", extracted_text: extracted }
+        ]);
+        continue;
       }
     }
-  }
 
-  for (const attachment of deduped) {
-    if (typeof attachment.extracted_text !== "string" || !attachment.extracted_text.trim()) continue;
-    if (isExtractedTextJsonArray(attachment.extracted_text)) continue;
-
-    const normalized = normalizeExtractedTextJson(
-      attachment.name || path.basename(attachment.path || "") || "unknown",
-      attachment.extracted_text
-    );
-    if (normalized) {
-      attachment.extracted_text = normalized;
-    }
-  }
-
-  for (const attachment of deduped) {
-    if (typeof attachment.extracted_text === "string" && attachment.extracted_text.trim()) continue;
-    const extractedText = await extractAttachmentTextBestEffort(attachment);
+    // Extract text from file
+    const ext = attachment.actual_ext || attachment.file_ext || fileExtension(attachment.name || attachment.path || "");
+    const extractedText = await textExtractor.fromPath(attachment);
+    
     if (extractedText) {
-      const normalized = normalizeExtractedTextJson(
-        attachment.name || path.basename(attachment.path || "") || "unknown",
-        extractedText
-      );
-      if (normalized) {
-        attachment.extracted_text = normalized;
-      }
+      attachment.extracted_text = JSON.stringify([
+        { filename: attachment.name || path.basename(attachment.path || ""), extracted_text: extractedText }
+      ]);
     }
   }
 
@@ -1489,10 +718,31 @@ async function deriveContextAttachments(req, args) {
   return deduped;
 }
 
+/**
+ * Helper: Derive simple attachment metadata for OPA input
+ * Extracts attachment-related properties from tool arguments
+ */
+function deriveAttachmentMetadata(args) {
+  return {
+    attachmentName: args?.attachmentName || args?.attachment_name || null,
+    attachmentBytes: Number(args?.attachmentBytes || args?.attachment_bytes || 0),
+    attachmentCount: Array.isArray(args?.attachments) ? args.attachments.length : 0
+  };
+}
+
+/**
+ * Helper: get file extension (used in multiple places)
+ */
+function fileExtension(value) {
+  if (typeof value !== "string" || value.trim() === "") return "";
+  const ext = path.extname(value).toLowerCase();
+  return ext.startsWith(".") ? ext.slice(1) : ext;
+}
+
 function normalizeToolArguments(name, args) {
   const normalized = args && typeof args === "object" ? { ...args } : {};
   if (name === "send_email" || name === "draft_email") {
-    const attachmentPaths = normalizeAttachmentPaths(normalized);
+    const attachmentPaths = AttachmentMetadata.normalizeAttachmentPaths(normalized);
     const { allowedPaths, rejectedPaths } = enforceAttachmentSandbox(attachmentPaths);
 
     if (rejectedPaths.length > 0) {
@@ -2213,9 +1463,7 @@ if (shouldStartServer) {
   server = app.listen(port, () => {
     console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
     const { canonicalRoot } = getAttachmentSandboxRoots();
-    console.log(
-      `[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT} (source=${ATTACHMENT_SANDBOX_SOURCE})`
-    );
+    console.log(`[gmail-mcp-http] Attachment sandbox root: ${ATTACHMENT_SANDBOX_ROOT}`);
     if (canonicalRoot !== ATTACHMENT_SANDBOX_ROOT) {
       console.log(
         `[gmail-mcp-http] Attachment sandbox canonical root: ${canonicalRoot}`
