@@ -282,7 +282,7 @@ export function createAgent({ mcpClientManager, jsonMode = false, debugLogs = nu
       "- Do not explain plans or reasoning.",
       "- Never claim an action happened unless the tool succeeded.",
       "- If action fails, say it failed and provide only the best factual result available.",
-    ].join(\"\\n\");
+    ].join("\\n");
 
     const messages = [
       { role: "system", content: systemPrompt }
