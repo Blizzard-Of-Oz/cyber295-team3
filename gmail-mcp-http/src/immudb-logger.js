@@ -261,4 +261,47 @@ export class ImmuDBLogger {
 
     await Promise.allSettled([executeWithRetry(kvWrite), executeWithRetry(sqlInsert)]);
   }
+
+  async fetchRecentAllowedPolicyDecisions({ authenticatedUser, toolName, lookbackHours = 24 } = {}) {
+    if (!this.enabled || !this.useSql) return [];
+    if (!authenticatedUser || !toolName) return [];
+
+    await this.init();
+    const esc = (str) => String(str ?? "").replace(/'/g, "''");
+    const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000).toISOString();
+    const sql =
+      "SELECT authenticated_user, tool_name, allow, opa_request, ts FROM mcp_policy_decisions WHERE " +
+      `authenticated_user='${esc(authenticatedUser)}' AND tool_name='${esc(toolName)}' AND allow='true' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
+
+    const runQuery = async () => {
+      const response = await this.client.SQLQuery({ sql });
+      const rows = Array.isArray(response?.rows) ? response.rows : [];
+      return rows.map((row) => {
+        const rawRequest = row.opa_request?.prop ?? row.opa_request ?? "";
+        let parsedRequest = null;
+        try {
+          parsedRequest = rawRequest ? JSON.parse(rawRequest) : null;
+        } catch (_error) {
+          parsedRequest = null;
+        }
+        return {
+          authenticated_user: row.authenticated_user?.prop ?? row.authenticated_user ?? null,
+          tool_name: row.tool_name?.prop ?? row.tool_name ?? null,
+          allow: row.allow?.prop ?? row.allow ?? null,
+          ts: row.ts?.prop ?? row.ts ?? null,
+          opa_request: parsedRequest
+        };
+      });
+    };
+
+    try {
+      return await runQuery();
+    } catch (error) {
+      if (error.code === 7 && error.details?.includes("token has expired")) {
+        await this.reAuthenticate();
+        return runQuery();
+      }
+      return [];
+    }
+  }
 }
