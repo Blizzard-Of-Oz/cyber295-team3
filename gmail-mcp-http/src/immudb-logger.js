@@ -373,7 +373,11 @@ export class ImmuDBLogger {
 
     const runQuery = async () => {
       const response = await this.client.SQLQuery({ sql });
-      const rows = Array.isArray(response?.rows) ? response.rows : [];
+      const rows = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.rows)
+          ? response.rows
+          : [];
       this.debugLog("UC29 SQL raw rows returned", { rowCount: rows.length });
       return rows.map((row) => {
         const asNum = (value) => {
@@ -443,8 +447,7 @@ export class ImmuDBLogger {
       });
     };
 
-    try {
-      const parsedRows = await runQuery();
+    const finalizeRows = (parsedRows) => {
       const matchedRows = parsedRows.filter(
         (row) => row.tool_matches && row.allow_normalized && row.recipient_matches
       );
@@ -466,10 +469,16 @@ export class ImmuDBLogger {
         }))
       });
       return matchedRows;
+    };
+
+    try {
+      const parsedRows = await runQuery();
+      return finalizeRows(parsedRows);
     } catch (error) {
       if (error.code === 7 && error.details?.includes("token has expired")) {
         await this.reAuthenticate();
-        return runQuery();
+        const parsedRows = await runQuery();
+        return finalizeRows(parsedRows);
       }
       return [];
     }
@@ -498,7 +507,11 @@ export class ImmuDBLogger {
 
     const runQuery = async () => {
       const response = await this.client.SQLQuery({ sql });
-      const rows = Array.isArray(response?.rows) ? response.rows : [];
+      const rows = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.rows)
+          ? response.rows
+          : [];
       this.debugLog("UC29 mcp_actions raw rows returned", { rowCount: rows.length });
       const normalizeEmail = (value) => String(value ?? "").trim().toLowerCase();
       const splitRecipients = (value) =>
@@ -543,8 +556,7 @@ export class ImmuDBLogger {
         });
     };
 
-    try {
-      const matchedRows = await runQuery();
+    const finalizeRows = (matchedRows) => {
       this.debugLog("UC29 mcp_actions matched rows", {
         matchedRowCount: matchedRows.length,
         rows: matchedRows.map((row) => ({
@@ -555,10 +567,16 @@ export class ImmuDBLogger {
         }))
       });
       return matchedRows;
+    };
+
+    try {
+      const matchedRows = await runQuery();
+      return finalizeRows(matchedRows);
     } catch (error) {
       if (error.code === 7 && error.details?.includes("token has expired")) {
         await this.reAuthenticate();
-        return runQuery();
+        const matchedRows = await runQuery();
+        return finalizeRows(matchedRows);
       }
       return [];
     }
