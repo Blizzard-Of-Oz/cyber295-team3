@@ -373,21 +373,39 @@ async function buildOpaInput(req, toolName, args, options = {}) {
     };
 
     if (primaryRecipient) {
-      const hasOverride = Object.prototype.hasOwnProperty.call(options, "historyRowsOverride");
-      const rows = hasOverride
-        ? options.historyRowsOverride
-        : typeof immudbLogger?.fetchRecentAllowedPolicyDecisions === "function"
-          ? await immudbLogger.fetchRecentAllowedPolicyDecisions({
+      const normalizedRecipient = normalizeEmailAddress(primaryRecipient);
+      const hasActionOverride = Object.prototype.hasOwnProperty.call(options, "historyActionRowsOverride");
+      const hasPolicyOverride = Object.prototype.hasOwnProperty.call(options, "historyPolicyRowsOverride");
+      let sourceTable = "mcp_actions";
+      let rows = hasActionOverride
+        ? options.historyActionRowsOverride
+        : typeof immudbLogger?.fetchRecentSuccessfulSendActions === "function"
+          ? await immudbLogger.fetchRecentSuccessfulSendActions({
               authenticatedUser,
-              toolName: "send_email",
-              normalizedRecipient: normalizeEmailAddress(primaryRecipient),
+              normalizedRecipient,
               lookbackHours: 24
             })
           : [];
+
+      if (!rows || rows.length === 0) {
+        sourceTable = "mcp_policy_decisions";
+        rows = hasPolicyOverride
+          ? options.historyPolicyRowsOverride
+          : typeof immudbLogger?.fetchRecentAllowedPolicyDecisions === "function"
+            ? await immudbLogger.fetchRecentAllowedPolicyDecisions({
+                authenticatedUser,
+                toolName: "send_email",
+                normalizedRecipient,
+                lookbackHours: 24
+              })
+            : [];
+      }
+
       const scopedRows = filterRowsByAuthenticatedUser(rows, authenticatedUser);
       debugLog("UC29 history rows fetched", {
         authenticatedUser,
-        recipient: normalizeEmailAddress(primaryRecipient),
+        recipient: normalizedRecipient,
+        tableQueried: sourceTable,
         rowCount: rows.length,
         scopedRowCount: scopedRows.length
       });
@@ -574,17 +592,20 @@ app.post("/call-tool", async (req, res) => {
     const opaDecision = await callOpaDecision(req, name, args);
     const requesterIp = getRequesterIp(req);
     const targetUserId = deriveTarget(args);
+    const recipients = name === "send_email" ? collectRecipientAddresses(args) : [];
+    const normalizedPrimaryRecipient = recipients[0] || normalizeEmailAddress(targetUserId);
+    const sendMetrics =
+      name === "send_email" ? estimateMessageMetrics(args) : { totalBytes: 0, attachmentBytes: 0, subject: "" };
 
     const opaRequest = await buildOpaInput(req, name, args);
-    const sendMetrics = name === "send_email" ? estimateMessageMetrics(args) : { totalBytes: 0, attachmentBytes: 0 };
     immudbLogger
       .recordPolicyDecision({
         authenticatedUser,
         requesterIp,
         toolName: name,
         targetUserId,
-        recipient: opaRequest?.context?.counters?.recipient || normalizeEmailAddress(targetUserId),
-        subject: args?.subject || args?.message?.subject || "",
+        recipient: opaRequest?.context?.counters?.recipient || normalizedPrimaryRecipient,
+        subject: args?.subject || args?.message?.subject || sendMetrics.subject || "",
         messageBytes: sendMetrics.totalBytes,
         attachmentBytes: sendMetrics.attachmentBytes,
         allow: opaDecision.allow,
@@ -605,6 +626,10 @@ app.post("/call-tool", async (req, res) => {
           authenticatedUser,
           requesterIp,
           targetUserId,
+          recipient: normalizedPrimaryRecipient,
+          subject: sendMetrics.subject || "",
+          messageBytes: sendMetrics.totalBytes,
+          attachmentBytes: sendMetrics.attachmentBytes,
           action: name,
           status: auditStatus,
           durationMs: Date.now() - startedAt,
@@ -643,6 +668,10 @@ app.post("/call-tool", async (req, res) => {
         authenticatedUser,
         requesterIp,
         targetUserId,
+        recipient: normalizedPrimaryRecipient,
+        subject: sendMetrics.subject || "",
+        messageBytes: sendMetrics.totalBytes,
+        attachmentBytes: sendMetrics.attachmentBytes,
         action: name,
         status: auditStatus,
         durationMs: Date.now() - startedAt,

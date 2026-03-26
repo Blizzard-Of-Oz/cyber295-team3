@@ -48,7 +48,7 @@ test('first send to recipient has prior count 0', async () => {
     makeReq(),
     'send_email',
     { to: 'jimmy.m.yammine@gmail.com', subject: 'Part 1', body: 'a' },
-    { historyRowsOverride: [] }
+    { historyActionRowsOverride: [] }
   );
 
   assert.equal(input.context.counters.emails_to_same_recipient_last_24h, 0);
@@ -62,7 +62,7 @@ test('second send to same recipient has prior count 1', async () => {
     'send_email',
     { to: 'jimmy.m.yammine@gmail.com', subject: 'Part 2', body: 'b' },
     {
-      historyRowsOverride: [
+      historyActionRowsOverride: [
         {
           target_user_id: 'jimmy.m.yammine@gmail.com',
           subject: 'Part 1',
@@ -85,7 +85,7 @@ test('third send within same hour has prior count 2', async () => {
     'send_email',
     { to: 'jimmy.m.yammine@gmail.com', subject: 'Part 3', body: 'c' },
     {
-      historyRowsOverride: [
+      historyActionRowsOverride: [
         {
           target_user_id: 'jimmy.m.yammine@gmail.com',
           subject: 'Part 1',
@@ -115,7 +115,7 @@ test('different recipient rows do not affect counters', async () => {
     'send_email',
     { to: 'jimmy.m.yammine@gmail.com', subject: 'Part X', body: 'x' },
     {
-      historyRowsOverride: [
+      historyActionRowsOverride: [
         {
           target_user_id: 'someoneelse@gmail.com',
           subject: 'Other',
@@ -138,7 +138,7 @@ test('different user rows do not affect counters', async () => {
     'send_email',
     { to: 'jimmy.m.yammine@gmail.com', subject: 'Part Y', body: 'y' },
     {
-      historyRowsOverride: [
+      historyActionRowsOverride: [
         {
           authenticated_user: 'other.user@billyyaoischoolberkeley.onmicrosoft.com',
           target_user_id: 'jimmy.m.yammine@gmail.com',
@@ -162,4 +162,29 @@ test('filterRowsByAuthenticatedUser keeps same-user rows only', () => {
   ];
   const scoped = filterRowsByAuthenticatedUser(rows, 'a@x.com');
   assert.equal(scoped.length, 2);
+});
+
+test('policy-decision fallback works when action rows are missing', async () => {
+  const now = new Date().toISOString();
+  const input = await buildOpaInput(
+    makeReq('team3@billyyaoischoolberkeley.onmicrosoft.com'),
+    'send_email',
+    { to: 'jimmy.m.yammine@gmail.com', subject: 'Part Fallback', body: 'f' },
+    {
+      historyActionRowsOverride: [],
+      historyPolicyRowsOverride: [
+        {
+          authenticated_user: 'team3@billyyaoischoolberkeley.onmicrosoft.com',
+          target_user_id: 'jimmy.m.yammine@gmail.com',
+          subject: 'Prior Policy Row',
+          message_bytes: 25,
+          attachment_bytes: 0,
+          ts: now
+        }
+      ]
+    }
+  );
+
+  assert.equal(input.context.counters.emails_to_same_recipient_last_24h, 1);
+  assert.equal(input.context.counters.emails_to_same_recipient_last_1h, 1);
 });

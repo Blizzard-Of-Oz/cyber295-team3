@@ -114,6 +114,7 @@ export class ImmuDBLogger {
     try {
       await this.execSqlWithRetry(ddlActions);
       await this.execSqlWithRetry(ddlPolicy);
+      await this.ensureActionColumns();
       await this.ensurePolicyDecisionColumns();
     } catch (error) {
       console.warn("Failed to ensure immuDB SQL table:", error.message);
@@ -141,6 +142,31 @@ export class ImmuDBLogger {
           continue;
         }
         console.warn("Failed SQL schema evolution for mcp_policy_decisions:", error.message);
+      }
+    }
+  }
+
+  async ensureActionColumns() {
+    if (!this.useSql) return;
+    const addColumnStatements = [
+      "ALTER TABLE mcp_actions ADD COLUMN recipient VARCHAR",
+      "ALTER TABLE mcp_actions ADD COLUMN subject VARCHAR",
+      "ALTER TABLE mcp_actions ADD COLUMN message_bytes INTEGER",
+      "ALTER TABLE mcp_actions ADD COLUMN attachment_bytes INTEGER"
+    ];
+    for (const sql of addColumnStatements) {
+      try {
+        await this.execSqlWithRetry(sql);
+      } catch (error) {
+        const message = String(error?.details || error?.message || "").toLowerCase();
+        if (
+          message.includes("already exists") ||
+          message.includes("duplicate") ||
+          message.includes("exists")
+        ) {
+          continue;
+        }
+        console.warn("Failed SQL schema evolution for mcp_actions:", error.message);
       }
     }
   }
@@ -185,6 +211,10 @@ export class ImmuDBLogger {
     authenticatedUser,
     requesterIp,
     targetUserId,
+    recipient,
+    subject,
+    messageBytes,
+    attachmentBytes,
     action,
     status,
     durationMs,
@@ -206,6 +236,10 @@ export class ImmuDBLogger {
         authenticatedUser,
         requesterIp,
         targetUserId,
+        recipient,
+        subject,
+        message_bytes: Number.isFinite(messageBytes) ? messageBytes : 0,
+        attachment_bytes: Number.isFinite(attachmentBytes) ? attachmentBytes : 0,
         action,
         status,
         duration_ms: durationMs,
@@ -222,9 +256,13 @@ export class ImmuDBLogger {
       if (!this.useSql) return;
       const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
       const durationValue = Number.isFinite(durationMs) ? durationMs : null;
+      const normalizedMessageBytes = Number.isFinite(messageBytes) ? Math.max(0, Math.floor(messageBytes)) : 0;
+      const normalizedAttachmentBytes = Number.isFinite(attachmentBytes)
+        ? Math.max(0, Math.floor(attachmentBytes))
+        : 0;
       const sql =
-        "INSERT INTO mcp_actions(authenticated_user, requester_ip, target_user_id, action, status, duration_ms, result_summary, error_code, error_message, correlation_id, ts) VALUES('" +
-        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(targetUserId)}','${esc(action)}','${esc(status)}',${durationValue === null ? "null" : durationValue},'${esc(resultSummary)}','${esc(errorCode)}','${esc(errorMessage)}','${esc(correlationId)}','${esc(timestamp)}')`;
+        "INSERT INTO mcp_actions(authenticated_user, requester_ip, target_user_id, recipient, subject, message_bytes, attachment_bytes, action, status, duration_ms, result_summary, error_code, error_message, correlation_id, ts) VALUES('" +
+        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(targetUserId)}','${esc(recipient)}','${esc(subject)}',${normalizedMessageBytes},${normalizedAttachmentBytes},'${esc(action)}','${esc(status)}',${durationValue === null ? "null" : durationValue},'${esc(resultSummary)}','${esc(errorCode)}','${esc(errorMessage)}','${esc(correlationId)}','${esc(timestamp)}')`;
       await this.execSqlWithRetry(sql);
     };
 
@@ -424,6 +462,95 @@ export class ImmuDBLogger {
           target_user_id: row.target_user_id,
           tool_name: row.tool_name,
           allow: row.allow,
+          ts: row.ts
+        }))
+      });
+      return matchedRows;
+    } catch (error) {
+      if (error.code === 7 && error.details?.includes("token has expired")) {
+        await this.reAuthenticate();
+        return runQuery();
+      }
+      return [];
+    }
+  }
+
+  async fetchRecentSuccessfulSendActions({
+    authenticatedUser,
+    normalizedRecipient,
+    lookbackHours = 24
+  } = {}) {
+    if (!this.enabled || !this.useSql) return [];
+    if (!authenticatedUser) return [];
+
+    await this.init();
+    const esc = (str) => String(str ?? "").replace(/'/g, "''");
+    const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000).toISOString();
+    const sql =
+      "SELECT authenticated_user, target_user_id, recipient, subject, message_bytes, attachment_bytes, action, status, ts FROM mcp_actions WHERE " +
+      `authenticated_user='${esc(authenticatedUser)}' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
+    this.debugLog("UC29 action lookup params", {
+      authenticatedUser,
+      normalizedRecipient: normalizedRecipient || null,
+      lookbackHours,
+      cutoff
+    });
+
+    const runQuery = async () => {
+      const response = await this.client.SQLQuery({ sql });
+      const rows = Array.isArray(response?.rows) ? response.rows : [];
+      this.debugLog("UC29 mcp_actions raw rows returned", { rowCount: rows.length });
+      const normalizeEmail = (value) => String(value ?? "").trim().toLowerCase();
+      const splitRecipients = (value) =>
+        String(value ?? "")
+          .split(",")
+          .map((entry) => normalizeEmail(entry))
+          .filter(Boolean);
+      return rows
+        .map((row) => {
+          const asNum = (value) => {
+            const raw = value?.prop ?? value;
+            const parsed = Number(raw);
+            return Number.isFinite(parsed) ? parsed : 0;
+          };
+          const asStr = (value) => String(value?.prop ?? value ?? "");
+          const action = asStr(row.action).trim().toLowerCase();
+          const status = asStr(row.status).trim().toLowerCase();
+          const recipients = [
+            ...splitRecipients(asStr(row.target_user_id)),
+            ...splitRecipients(asStr(row.recipient))
+          ];
+          return {
+            authenticated_user: asStr(row.authenticated_user),
+            target_user_id: asStr(row.target_user_id),
+            recipient: asStr(row.recipient),
+            subject: asStr(row.subject),
+            message_bytes: asNum(row.message_bytes),
+            attachment_bytes: asNum(row.attachment_bytes),
+            action,
+            status,
+            ts: asStr(row.ts),
+            recipients
+          };
+        })
+        .filter((row) => {
+          const actionMatch = row.action === "send_email";
+          const statusMatch = row.status === "success";
+          const recipientMatch = normalizedRecipient
+            ? row.recipients.includes(normalizedRecipient)
+            : true;
+          return actionMatch && statusMatch && recipientMatch;
+        });
+    };
+
+    try {
+      const matchedRows = await runQuery();
+      this.debugLog("UC29 mcp_actions matched rows", {
+        matchedRowCount: matchedRows.length,
+        rows: matchedRows.map((row) => ({
+          target_user_id: row.target_user_id,
+          action: row.action,
+          status: row.status,
           ts: row.ts
         }))
       });
