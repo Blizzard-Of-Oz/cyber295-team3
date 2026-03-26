@@ -199,6 +199,15 @@ function splitTargetRecipients(value) {
     .filter(Boolean);
 }
 
+function filterRowsByAuthenticatedUser(rows, authenticatedUser) {
+  const normalizedUser = String(authenticatedUser || "").trim().toLowerCase();
+  return (rows || []).filter((row) => {
+    const rowUser = String(row?.authenticated_user || row?.authenticatedUser || "").trim().toLowerCase();
+    if (!rowUser) return true;
+    return rowUser === normalizedUser;
+  });
+}
+
 function collectRecipientAddresses(args = {}) {
   const raw = [];
   const collect = (value) => {
@@ -371,18 +380,21 @@ async function buildOpaInput(req, toolName, args, options = {}) {
           ? await immudbLogger.fetchRecentAllowedPolicyDecisions({
               authenticatedUser,
               toolName: "send_email",
+              normalizedRecipient: normalizeEmailAddress(primaryRecipient),
               lookbackHours: 24
             })
           : [];
+      const scopedRows = filterRowsByAuthenticatedUser(rows, authenticatedUser);
       debugLog("UC29 history rows fetched", {
         authenticatedUser,
-        recipient: primaryRecipient,
-        rowCount: rows.length
+        recipient: normalizeEmailAddress(primaryRecipient),
+        rowCount: rows.length,
+        scopedRowCount: scopedRows.length
       });
       counters = {
         ...counters,
         ...computeRecipientCountersFromPolicyRows({
-          rows,
+          rows: scopedRows,
           recipient: primaryRecipient,
           currentSubject: currentMetrics.subject,
           currentMessageBytes: currentMetrics.totalBytes,
@@ -707,5 +719,6 @@ export {
   estimateMessageMetrics,
   isExternalRecipient,
   normalizeEmailAddress,
-  splitTargetRecipients
+  splitTargetRecipients,
+  filterRowsByAuthenticatedUser
 };

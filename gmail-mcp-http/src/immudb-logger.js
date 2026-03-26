@@ -313,6 +313,7 @@ export class ImmuDBLogger {
   async fetchRecentAllowedPolicyDecisions({
     authenticatedUser,
     toolName,
+    normalizedRecipient,
     lookbackHours = 24
   } = {}) {
     if (!this.enabled || !this.useSql) return [];
@@ -322,11 +323,12 @@ export class ImmuDBLogger {
     const esc = (str) => String(str ?? "").replace(/'/g, "''");
     const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000).toISOString();
     const sql =
-      "SELECT authenticated_user, tool_name, target_user_id, recipient, subject, message_bytes, attachment_bytes, allow, ts FROM mcp_policy_decisions WHERE " +
-      `authenticated_user='${esc(authenticatedUser)}' AND tool_name='${esc(toolName)}' AND allow='true' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
+      "SELECT authenticated_user, tool_name, target_user_id, recipient, subject, message_bytes, attachment_bytes, allow, ts, opa_request FROM mcp_policy_decisions WHERE " +
+      `authenticated_user='${esc(authenticatedUser)}' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
     this.debugLog("UC29 SQL lookup params", {
       authenticatedUser,
       toolName,
+      normalizedRecipient: normalizedRecipient || null,
       lookbackHours,
       cutoff
     });
@@ -341,22 +343,73 @@ export class ImmuDBLogger {
           const parsed = Number(raw);
           return Number.isFinite(parsed) ? parsed : 0;
         };
+        const asStr = (value) => String(value?.prop ?? value ?? "");
+        const normalizeEmail = (value) => asStr(value).trim().toLowerCase();
+        const splitRecipients = (value) =>
+          asStr(value)
+            .split(",")
+            .map((entry) => entry.trim().toLowerCase())
+            .filter(Boolean);
+        const parseRequestRecipients = (rawOpaRequest) => {
+          if (!rawOpaRequest) return [];
+          try {
+            const payload = JSON.parse(asStr(rawOpaRequest));
+            const args = payload?.tool?.arguments || {};
+            const collected = [];
+            const collect = (input) => {
+              if (Array.isArray(input)) {
+                input.forEach(collect);
+                return;
+              }
+              if (typeof input === "string") collected.push(input);
+            };
+            collect(args.to);
+            collect(args.cc);
+            collect(args.bcc);
+            collect(args?.message?.to);
+            collect(args?.message?.cc);
+            collect(args?.message?.bcc);
+            return collected
+              .map((entry) => normalizeEmail(entry))
+              .filter((entry) => entry.includes("@"));
+          } catch (_error) {
+            return [];
+          }
+        };
+
+        const targetRecipients = splitRecipients(row.target_user_id);
+        const recipientColumn = splitRecipients(row.recipient);
+        const fallbackRecipients = parseRequestRecipients(row.opa_request);
+        const allRecipients = [...new Set([...targetRecipients, ...recipientColumn, ...fallbackRecipients])];
+        const toolNameValue = normalizeEmail(row.tool_name);
+        const allowValue = asStr(row.allow).trim().toLowerCase();
+        const allowNormalized = allowValue === "true" || allowValue === "allow" || allowValue === "1";
+        const recipientMatches = normalizedRecipient ? allRecipients.includes(normalizedRecipient) : true;
+        const toolMatches = toolNameValue === String(toolName).trim().toLowerCase();
+
         return {
-          authenticated_user: row.authenticated_user?.prop ?? row.authenticated_user ?? null,
-          tool_name: row.tool_name?.prop ?? row.tool_name ?? null,
-          target_user_id: row.target_user_id?.prop ?? row.target_user_id ?? null,
-          recipient: row.recipient?.prop ?? row.recipient ?? null,
-          subject: row.subject?.prop ?? row.subject ?? null,
+          authenticated_user: asStr(row.authenticated_user),
+          tool_name: asStr(row.tool_name),
+          target_user_id: asStr(row.target_user_id),
+          recipient: asStr(row.recipient),
+          subject: asStr(row.subject),
           message_bytes: asNum(row.message_bytes),
           attachment_bytes: asNum(row.attachment_bytes),
-          allow: row.allow?.prop ?? row.allow ?? null,
-          ts: row.ts?.prop ?? row.ts ?? null
+          allow: allowValue,
+          allow_normalized: allowNormalized,
+          ts: asStr(row.ts),
+          all_recipients: allRecipients,
+          tool_matches: toolMatches,
+          recipient_matches: recipientMatches
         };
       });
     };
 
     try {
       const parsedRows = await runQuery();
+      const matchedRows = parsedRows.filter(
+        (row) => row.tool_matches && row.allow_normalized && row.recipient_matches
+      );
       this.debugLog("UC29 SQL parsed rows", {
         rows: parsedRows.map((row) => ({
           target_user_id: row.target_user_id,
@@ -365,7 +418,16 @@ export class ImmuDBLogger {
           ts: row.ts
         }))
       });
-      return parsedRows;
+      this.debugLog("UC29 SQL matched rows", {
+        matchedRowCount: matchedRows.length,
+        rows: matchedRows.map((row) => ({
+          target_user_id: row.target_user_id,
+          tool_name: row.tool_name,
+          allow: row.allow,
+          ts: row.ts
+        }))
+      });
+      return matchedRows;
     } catch (error) {
       if (error.code === 7 && error.details?.includes("token has expired")) {
         await this.reAuthenticate();
