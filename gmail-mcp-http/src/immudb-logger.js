@@ -104,8 +104,34 @@ export class ImmuDBLogger {
     try {
       await this.execSqlWithRetry(ddlActions);
       await this.execSqlWithRetry(ddlPolicy);
+      await this.ensurePolicyDecisionColumns();
     } catch (error) {
       console.warn("Failed to ensure immuDB SQL table:", error.message);
+    }
+  }
+
+  async ensurePolicyDecisionColumns() {
+    if (!this.useSql) return;
+    const addColumnStatements = [
+      "ALTER TABLE mcp_policy_decisions ADD COLUMN recipient VARCHAR",
+      "ALTER TABLE mcp_policy_decisions ADD COLUMN subject VARCHAR",
+      "ALTER TABLE mcp_policy_decisions ADD COLUMN message_bytes INTEGER",
+      "ALTER TABLE mcp_policy_decisions ADD COLUMN attachment_bytes INTEGER"
+    ];
+    for (const sql of addColumnStatements) {
+      try {
+        await this.execSqlWithRetry(sql);
+      } catch (error) {
+        const message = String(error?.details || error?.message || "").toLowerCase();
+        if (
+          message.includes("already exists") ||
+          message.includes("duplicate") ||
+          message.includes("exists")
+        ) {
+          continue;
+        }
+        console.warn("Failed SQL schema evolution for mcp_policy_decisions:", error.message);
+      }
     }
   }
 
@@ -211,6 +237,10 @@ export class ImmuDBLogger {
     requesterIp,
     toolName,
     targetUserId,
+    recipient,
+    subject,
+    messageBytes,
+    attachmentBytes,
     allow,
     reason,
     opaRequest,
@@ -230,6 +260,10 @@ export class ImmuDBLogger {
         requesterIp,
         toolName,
         targetUserId,
+        recipient,
+        subject,
+        message_bytes: Number.isFinite(messageBytes) ? messageBytes : 0,
+        attachment_bytes: Number.isFinite(attachmentBytes) ? attachmentBytes : 0,
         allow: Boolean(allow),
         reason: reason || "unknown",
         opaRequest,
@@ -242,9 +276,13 @@ export class ImmuDBLogger {
     const sqlInsert = async () => {
       if (!this.useSql) return;
       const esc = (str) => String(str ?? "unknown").replace(/'/g, "''");
+      const normalizedMessageBytes = Number.isFinite(messageBytes) ? Math.max(0, Math.floor(messageBytes)) : 0;
+      const normalizedAttachmentBytes = Number.isFinite(attachmentBytes)
+        ? Math.max(0, Math.floor(attachmentBytes))
+        : 0;
       const sql =
-        "INSERT INTO mcp_policy_decisions(authenticated_user, requester_ip, tool_name, target_user_id, allow, reason, opa_request, opa_response, ts) VALUES('" +
-        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}')`;
+        "INSERT INTO mcp_policy_decisions(authenticated_user, requester_ip, tool_name, target_user_id, recipient, subject, message_bytes, attachment_bytes, allow, reason, opa_request, opa_response, ts) VALUES('" +
+        `${esc(authenticatedUser)}','${esc(requesterIp)}','${esc(toolName)}','${esc(targetUserId)}','${esc(recipient)}','${esc(subject)}',${normalizedMessageBytes},${normalizedAttachmentBytes},'${esc(Boolean(allow))}','${esc(reason)}','${esc(JSON.stringify(opaRequest))}','${esc(JSON.stringify(opaResponse))}','${esc(timestamp)}')`;
       await this.execSqlWithRetry(sql);
     };
 
@@ -262,34 +300,41 @@ export class ImmuDBLogger {
     await Promise.allSettled([executeWithRetry(kvWrite), executeWithRetry(sqlInsert)]);
   }
 
-  async fetchRecentAllowedPolicyDecisions({ authenticatedUser, toolName, lookbackHours = 24 } = {}) {
+  async fetchRecentAllowedPolicyDecisions({
+    authenticatedUser,
+    toolName,
+    recipient,
+    lookbackHours = 24
+  } = {}) {
     if (!this.enabled || !this.useSql) return [];
-    if (!authenticatedUser || !toolName) return [];
+    if (!authenticatedUser || !toolName || !recipient) return [];
 
     await this.init();
     const esc = (str) => String(str ?? "").replace(/'/g, "''");
     const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000).toISOString();
     const sql =
-      "SELECT authenticated_user, tool_name, allow, opa_request, ts FROM mcp_policy_decisions WHERE " +
-      `authenticated_user='${esc(authenticatedUser)}' AND tool_name='${esc(toolName)}' AND allow='true' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
+      "SELECT authenticated_user, tool_name, target_user_id, recipient, subject, message_bytes, attachment_bytes, allow, ts FROM mcp_policy_decisions WHERE " +
+      `authenticated_user='${esc(authenticatedUser)}' AND tool_name='${esc(toolName)}' AND allow='true' AND recipient='${esc(recipient)}' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
 
     const runQuery = async () => {
       const response = await this.client.SQLQuery({ sql });
       const rows = Array.isArray(response?.rows) ? response.rows : [];
       return rows.map((row) => {
-        const rawRequest = row.opa_request?.prop ?? row.opa_request ?? "";
-        let parsedRequest = null;
-        try {
-          parsedRequest = rawRequest ? JSON.parse(rawRequest) : null;
-        } catch (_error) {
-          parsedRequest = null;
-        }
+        const asNum = (value) => {
+          const raw = value?.prop ?? value;
+          const parsed = Number(raw);
+          return Number.isFinite(parsed) ? parsed : 0;
+        };
         return {
           authenticated_user: row.authenticated_user?.prop ?? row.authenticated_user ?? null,
           tool_name: row.tool_name?.prop ?? row.tool_name ?? null,
+          target_user_id: row.target_user_id?.prop ?? row.target_user_id ?? null,
+          recipient: row.recipient?.prop ?? row.recipient ?? null,
+          subject: row.subject?.prop ?? row.subject ?? null,
+          message_bytes: asNum(row.message_bytes),
+          attachment_bytes: asNum(row.attachment_bytes),
           allow: row.allow?.prop ?? row.allow ?? null,
-          ts: row.ts?.prop ?? row.ts ?? null,
-          opa_request: parsedRequest
+          ts: row.ts?.prop ?? row.ts ?? null
         };
       });
     };

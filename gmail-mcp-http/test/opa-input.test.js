@@ -6,9 +6,21 @@ process.env.NODE_ENV = 'test';
 const {
   buildOpaInput,
   collectRecipientAddresses,
-  computeRecipientCountersFromPolicyRows,
   isExternalRecipient
 } = await import('../src/server.js');
+
+function makeReq(user = 'employee@company.com') {
+  return {
+    method: 'POST',
+    path: '/call-tool',
+    headers: {
+      'x-authenticated-user': user,
+      'x-user-ip': '10.0.0.8'
+    },
+    body: { some: 'payload' },
+    socket: { remoteAddress: '127.0.0.1' }
+  };
+}
 
 test('collectRecipientAddresses normalizes and de-duplicates recipients', () => {
   const recipients = collectRecipientAddresses({
@@ -20,77 +32,95 @@ test('collectRecipientAddresses normalizes and de-duplicates recipients', () => 
   assert.deepEqual(recipients, ['personal@gmail.com', 'ally@example.com', 'audit@example.com']);
 });
 
-test('isExternalRecipient prefers external recipients', () => {
+test('isExternalRecipient compares normalized domains', () => {
   assert.equal(isExternalRecipient('partner@gmail.com', 'employee@company.com'), true);
-  assert.equal(isExternalRecipient('peer@company.com', 'employee@company.com'), false);
+  assert.equal(isExternalRecipient('Peer@Company.com', 'employee@company.com'), false);
 });
 
-test('computeRecipientCountersFromPolicyRows increments for same sender + recipient', () => {
-  const nowIso = new Date().toISOString();
-  const rows = [
-    {
-      ts: nowIso,
-      opa_request: {
-        tool: {
-          arguments: {
-            to: 'personal@gmail.com',
-            subject: 'Part 1',
-            body: 'A'
-          }
-        }
-      }
-    },
-    {
-      ts: nowIso,
-      opa_request: {
-        tool: {
-          arguments: {
-            to: ['personal@gmail.com'],
-            subject: 'Part 2',
-            body: 'B'
-          }
-        }
-      }
-    }
-  ];
-
-  const counters = computeRecipientCountersFromPolicyRows({
-    rows,
-    recipient: 'personal@gmail.com',
-    currentSubject: 'Part 3',
-    currentMessageBytes: 10,
-    currentAttachmentBytes: 0,
-    now: Date.now()
-  });
-
-  assert.equal(counters.emails_to_same_recipient_last_24h, 2);
-  assert.equal(counters.emails_to_same_recipient_last_1h, 2);
-  assert.equal(counters.unique_subjects_to_same_recipient_last_24h, 3);
-  assert.ok(counters.aggregate_data_volume_to_recipient_last_24h_bytes >= 10);
-});
-
-test('buildOpaInput includes UC29 counters in top-level context', async () => {
-  const req = {
-    method: 'POST',
-    path: '/call-tool',
-    headers: {
-      'x-authenticated-user': 'employee@company.com',
-      'x-user-ip': '10.0.0.8'
-    },
-    body: { some: 'payload' },
-    socket: { remoteAddress: '127.0.0.1' }
-  };
-
-  const input = await buildOpaInput(req, 'send_email', {
-    to: 'personal@gmail.com',
-    subject: 'Part 1',
-    body: 'hello'
-  });
-
-  assert.equal(typeof input.context.counters.emails_to_same_recipient_last_24h, 'number');
-  assert.equal(
-    typeof input.context.counters.aggregate_data_volume_to_recipient_last_24h_bytes,
-    'number'
+test('first send to recipient has prior count 0', async () => {
+  const input = await buildOpaInput(
+    makeReq(),
+    'send_email',
+    { to: 'jimmy.m.yammine@gmail.com', subject: 'Part 1', body: 'a' },
+    { historyRowsOverride: [] }
   );
-  assert.equal(input.context.counters.recipient, 'personal@gmail.com');
+
+  assert.equal(input.context.counters.emails_to_same_recipient_last_24h, 0);
+  assert.equal(input.context.counters.emails_to_same_recipient_last_1h, 0);
+});
+
+test('second send to same recipient has prior count 1', async () => {
+  const now = new Date().toISOString();
+  const input = await buildOpaInput(
+    makeReq(),
+    'send_email',
+    { to: 'jimmy.m.yammine@gmail.com', subject: 'Part 2', body: 'b' },
+    {
+      historyRowsOverride: [
+        {
+          recipient: 'jimmy.m.yammine@gmail.com',
+          subject: 'Part 1',
+          message_bytes: 10,
+          attachment_bytes: 0,
+          ts: now
+        }
+      ]
+    }
+  );
+
+  assert.equal(input.context.counters.emails_to_same_recipient_last_24h, 1);
+  assert.equal(input.context.counters.emails_to_same_recipient_last_1h, 1);
+});
+
+test('third send within same hour has prior count 2', async () => {
+  const now = new Date().toISOString();
+  const input = await buildOpaInput(
+    makeReq(),
+    'send_email',
+    { to: 'jimmy.m.yammine@gmail.com', subject: 'Part 3', body: 'c' },
+    {
+      historyRowsOverride: [
+        {
+          recipient: 'jimmy.m.yammine@gmail.com',
+          subject: 'Part 1',
+          message_bytes: 10,
+          attachment_bytes: 0,
+          ts: now
+        },
+        {
+          recipient: 'jimmy.m.yammine@gmail.com',
+          subject: 'Part 2',
+          message_bytes: 10,
+          attachment_bytes: 0,
+          ts: now
+        }
+      ]
+    }
+  );
+
+  assert.equal(input.context.counters.emails_to_same_recipient_last_24h, 2);
+  assert.equal(input.context.counters.emails_to_same_recipient_last_1h, 2);
+});
+
+test('different recipient rows do not affect counters', async () => {
+  const now = new Date().toISOString();
+  const input = await buildOpaInput(
+    makeReq(),
+    'send_email',
+    { to: 'jimmy.m.yammine@gmail.com', subject: 'Part X', body: 'x' },
+    {
+      historyRowsOverride: [
+        {
+          recipient: 'someoneelse@gmail.com',
+          subject: 'Other',
+          message_bytes: 42,
+          attachment_bytes: 0,
+          ts: now
+        }
+      ]
+    }
+  );
+
+  assert.equal(input.context.counters.emails_to_same_recipient_last_24h, 0);
+  assert.equal(input.context.counters.emails_to_same_recipient_last_1h, 0);
 });

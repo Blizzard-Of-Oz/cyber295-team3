@@ -288,16 +288,20 @@ function computeRecipientCountersFromPolicyRows({
   for (const row of rows || []) {
     const tsMs = Date.parse(row?.ts || "");
     if (!Number.isFinite(tsMs) || tsMs < dayAgo) continue;
-    const requestPayload = row?.opa_request;
-    const toolArgs = requestPayload?.tool?.arguments || {};
-    const recipients = collectRecipientAddresses(toolArgs);
-    if (!recipients.includes(recipientNorm)) continue;
+    const rowRecipient = normalizeEmailAddress(row?.recipient || row?.target_user_id);
+    if (rowRecipient !== recipientNorm) continue;
+    const messageBytes = Number.isFinite(Number(row?.message_bytes))
+      ? Math.max(0, Number(row?.message_bytes))
+      : 0;
+    const attachmentBytes = Number.isFinite(Number(row?.attachment_bytes))
+      ? Math.max(0, Number(row?.attachment_bytes))
+      : 0;
+    const subject = typeof row?.subject === "string" ? row.subject : "";
 
-    const metrics = estimateMessageMetrics(toolArgs);
     emails24h += 1;
-    aggregateDataVolume24h += metrics.totalBytes;
-    totalAttachmentBytes24h += metrics.attachmentBytes;
-    if (metrics.subject) subjectSet.add(metrics.subject.toLowerCase());
+    aggregateDataVolume24h += messageBytes;
+    totalAttachmentBytes24h += attachmentBytes;
+    if (subject) subjectSet.add(subject.toLowerCase());
     if (tsMs >= oneHourAgo) emails1h += 1;
   }
 
@@ -312,7 +316,7 @@ function computeRecipientCountersFromPolicyRows({
   };
 }
 
-async function buildOpaInput(req, toolName, args) {
+async function buildOpaInput(req, toolName, args, options = {}) {
   const requesterIp = getRequesterIp(req);
   const authenticatedUser = getAuthenticatedUser(req);
   const headers = collectOpaHeaders(req);
@@ -338,11 +342,22 @@ async function buildOpaInput(req, toolName, args) {
       }
     };
 
-    if (primaryRecipient && typeof immudbLogger?.fetchRecentAllowedPolicyDecisions === "function") {
-      const rows = await immudbLogger.fetchRecentAllowedPolicyDecisions({
+    if (primaryRecipient) {
+      const hasOverride = Object.prototype.hasOwnProperty.call(options, "historyRowsOverride");
+      const rows = hasOverride
+        ? options.historyRowsOverride
+        : typeof immudbLogger?.fetchRecentAllowedPolicyDecisions === "function"
+          ? await immudbLogger.fetchRecentAllowedPolicyDecisions({
+              authenticatedUser,
+              toolName: "send_email",
+              recipient: primaryRecipient,
+              lookbackHours: 24
+            })
+          : [];
+      debugLog("UC29 history rows fetched", {
         authenticatedUser,
-        toolName: "send_email",
-        lookbackHours: 24
+        recipient: primaryRecipient,
+        rowCount: rows.length
       });
       counters = {
         ...counters,
@@ -354,6 +369,11 @@ async function buildOpaInput(req, toolName, args) {
           currentAttachmentBytes: currentMetrics.attachmentBytes
         })
       };
+      debugLog("UC29 counters computed", {
+        authenticatedUser,
+        recipient: primaryRecipient,
+        counters
+      });
     }
 
     context.counters = counters;
@@ -524,12 +544,17 @@ app.post("/call-tool", async (req, res) => {
     const targetUserId = deriveTarget(args);
 
     const opaRequest = await buildOpaInput(req, name, args);
+    const sendMetrics = name === "send_email" ? estimateMessageMetrics(args) : { totalBytes: 0, attachmentBytes: 0 };
     immudbLogger
       .recordPolicyDecision({
         authenticatedUser,
         requesterIp,
         toolName: name,
         targetUserId,
+        recipient: opaRequest?.context?.counters?.recipient || null,
+        subject: args?.subject || args?.message?.subject || "",
+        messageBytes: sendMetrics.totalBytes,
+        attachmentBytes: sendMetrics.attachmentBytes,
         allow: opaDecision.allow,
         reason: opaDecision.reason,
         opaRequest: redactOpaInput(opaRequest),
