@@ -16,6 +16,8 @@ const OPA_DECISION_URL =
   process.env.OPA_DECISION_URL || "http://localhost:8181/v1/data/gmail/decision";
 const OPA_TIMEOUT_MS = process.env.OPA_TIMEOUT_MS ? Number(process.env.OPA_TIMEOUT_MS) : 2000;
 const OPA_FAIL_OPEN = process.env.OPA_FAIL_OPEN === "true";
+const UC29_THRESHOLD_EMAILS_24H = Number(process.env.UC29_THRESHOLD_EMAILS_24H || 4);
+const UC29_THRESHOLD_EMAILS_1H = Number(process.env.UC29_THRESHOLD_EMAILS_1H || 3);
 
 function debugLog(message, meta) {
   if (!DEBUG) return;
@@ -182,10 +184,250 @@ function extractToolError(result) {
   return null;
 }
 
-function buildOpaInput(req, toolName, args) {
+function normalizeEmailAddress(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function splitTargetRecipients(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeEmailAddress(entry)).filter(Boolean);
+  }
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((entry) => normalizeEmailAddress(entry))
+    .filter(Boolean);
+}
+
+function filterRowsByAuthenticatedUser(rows, authenticatedUser) {
+  const normalizedUser = String(authenticatedUser || "").trim().toLowerCase();
+  return (rows || []).filter((row) => {
+    const rowUser = String(row?.authenticated_user || row?.authenticatedUser || "").trim().toLowerCase();
+    if (!rowUser) return true;
+    return rowUser === normalizedUser;
+  });
+}
+
+function collectRecipientAddresses(args = {}) {
+  const raw = [];
+  const collect = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => collect(entry));
+      return;
+    }
+    if (typeof value === "string") {
+      raw.push(value);
+    }
+  };
+  collect(args.to);
+  collect(args.cc);
+  collect(args.bcc);
+  if (args.message && typeof args.message === "object") {
+    collect(args.message.to);
+    collect(args.message.cc);
+    collect(args.message.bcc);
+  }
+  const deduped = new Set();
+  for (const entry of raw) {
+    const normalized = normalizeEmailAddress(entry);
+    if (normalized.includes("@")) deduped.add(normalized);
+  }
+  return [...deduped];
+}
+
+function isExternalRecipient(recipient, authenticatedUser) {
+  const recipientDomain = normalizeEmailAddress(recipient).split("@")[1] || "";
+  const userDomain = normalizeEmailAddress(authenticatedUser).split("@")[1] || "";
+  if (!recipientDomain) return false;
+  if (!userDomain) return true;
+  return recipientDomain !== userDomain;
+}
+
+function estimateMessageMetrics(args = {}) {
+  const asBytes = (value) => {
+    if (value === null || value === undefined) return 0;
+    if (typeof value === "number") return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+    if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+    if (typeof value === "boolean") return 1;
+    if (Array.isArray(value)) return value.reduce((sum, entry) => sum + asBytes(entry), 0);
+    if (typeof value === "object") return Buffer.byteLength(JSON.stringify(value), "utf8");
+    return 0;
+  };
+
+  const bodyBytes = asBytes(args.body) + asBytes(args.message);
+  const subject = typeof args.subject === "string" ? args.subject : args.message?.subject || "";
+  const subjectBytes = asBytes(subject);
+
+  const attachmentsRaw = Array.isArray(args.attachments)
+    ? args.attachments
+    : Array.isArray(args.message?.attachments)
+      ? args.message.attachments
+      : [];
+  let attachmentBytes = 0;
+  for (const attachment of attachmentsRaw) {
+    const explicitSize = Number(
+      attachment?.sizeBytes ?? attachment?.size_bytes ?? attachment?.size ?? attachment?.bytes
+    );
+    if (Number.isFinite(explicitSize) && explicitSize >= 0) {
+      attachmentBytes += Math.floor(explicitSize);
+      continue;
+    }
+    if (typeof attachment?.content === "string") {
+      attachmentBytes += Buffer.byteLength(attachment.content, "utf8");
+    } else if (typeof attachment?.data === "string") {
+      attachmentBytes += Buffer.byteLength(attachment.data, "utf8");
+    } else {
+      attachmentBytes += asBytes(attachment);
+    }
+  }
+
+  return {
+    subject: typeof subject === "string" ? subject : "",
+    totalBytes: bodyBytes + subjectBytes + attachmentBytes,
+    attachmentBytes
+  };
+}
+
+function computeRecipientCountersFromPolicyRows({
+  rows,
+  recipient,
+  now = Date.now(),
+  currentSubject = "",
+  currentMessageBytes = 0,
+  currentAttachmentBytes = 0
+}) {
+  const recipientNorm = normalizeEmailAddress(recipient);
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const dayAgo = now - 24 * 60 * 60 * 1000;
+  let emails24h = 0;
+  let emails1h = 0;
+  let aggregateDataVolume24h = 0;
+  let totalAttachmentBytes24h = 0;
+  const subjectSet = new Set();
+
+  for (const row of rows || []) {
+    const tsMs = Date.parse(row?.ts || "");
+    if (!Number.isFinite(tsMs) || tsMs < dayAgo) continue;
+    const rowRecipients = [
+      ...splitTargetRecipients(row?.target_user_id),
+      ...splitTargetRecipients(row?.recipient)
+    ];
+    const matched = rowRecipients.includes(recipientNorm);
+    debugLog("UC29 row match check", {
+      target_user_id: row?.target_user_id || null,
+      rowRecipients,
+      normalizedRecipient: recipientNorm,
+      matched
+    });
+    if (!matched) continue;
+    const messageBytes = Number.isFinite(Number(row?.message_bytes))
+      ? Math.max(0, Number(row?.message_bytes))
+      : 0;
+    const attachmentBytes = Number.isFinite(Number(row?.attachment_bytes))
+      ? Math.max(0, Number(row?.attachment_bytes))
+      : 0;
+    const subject = typeof row?.subject === "string" ? row.subject : "";
+
+    emails24h += 1;
+    aggregateDataVolume24h += messageBytes;
+    totalAttachmentBytes24h += attachmentBytes;
+    if (subject) subjectSet.add(subject.toLowerCase());
+    if (tsMs >= oneHourAgo) emails1h += 1;
+  }
+
+  if (currentSubject) subjectSet.add(String(currentSubject).toLowerCase());
+
+  return {
+    emails_to_same_recipient_last_24h: emails24h,
+    emails_to_same_recipient_last_1h: emails1h,
+    aggregate_data_volume_to_recipient_last_24h_bytes: aggregateDataVolume24h + currentMessageBytes,
+    unique_subjects_to_same_recipient_last_24h: subjectSet.size,
+    total_attachment_bytes_to_recipient_last_24h: totalAttachmentBytes24h + currentAttachmentBytes
+  };
+}
+
+async function buildOpaInput(req, toolName, args, options = {}) {
   const requesterIp = getRequesterIp(req);
   const authenticatedUser = getAuthenticatedUser(req);
   const headers = collectOpaHeaders(req);
+  const context = {};
+
+  if (toolName === "send_email") {
+    const recipients = collectRecipientAddresses(args);
+    const externalRecipients = recipients.filter((recipient) =>
+      isExternalRecipient(recipient, authenticatedUser)
+    );
+    const [primaryRecipient] = externalRecipients;
+    const currentMetrics = estimateMessageMetrics(args);
+    let counters = {
+      recipient: primaryRecipient || null,
+      emails_to_same_recipient_last_24h: 0,
+      aggregate_data_volume_to_recipient_last_24h_bytes: currentMetrics.totalBytes,
+      emails_to_same_recipient_last_1h: 0,
+      unique_subjects_to_same_recipient_last_24h: currentMetrics.subject ? 1 : 0,
+      total_attachment_bytes_to_recipient_last_24h: currentMetrics.attachmentBytes,
+      uc29_thresholds: {
+        emails_last_24h: UC29_THRESHOLD_EMAILS_24H,
+        emails_last_1h: UC29_THRESHOLD_EMAILS_1H
+      }
+    };
+
+    if (primaryRecipient) {
+      const normalizedRecipient = normalizeEmailAddress(primaryRecipient);
+      const hasActionOverride = Object.prototype.hasOwnProperty.call(options, "historyActionRowsOverride");
+      const hasPolicyOverride = Object.prototype.hasOwnProperty.call(options, "historyPolicyRowsOverride");
+      let sourceTable = "mcp_actions";
+      let rows = hasActionOverride
+        ? options.historyActionRowsOverride
+        : typeof immudbLogger?.fetchRecentSuccessfulSendActions === "function"
+          ? await immudbLogger.fetchRecentSuccessfulSendActions({
+              authenticatedUser,
+              normalizedRecipient,
+              lookbackHours: 24
+            })
+          : [];
+
+      if (!rows || rows.length === 0) {
+        sourceTable = "mcp_policy_decisions";
+        rows = hasPolicyOverride
+          ? options.historyPolicyRowsOverride
+          : typeof immudbLogger?.fetchRecentAllowedPolicyDecisions === "function"
+            ? await immudbLogger.fetchRecentAllowedPolicyDecisions({
+                authenticatedUser,
+                toolName: "send_email",
+                normalizedRecipient,
+                lookbackHours: 24
+              })
+            : [];
+      }
+
+      const scopedRows = filterRowsByAuthenticatedUser(rows, authenticatedUser);
+      debugLog("UC29 history rows fetched", {
+        authenticatedUser,
+        recipient: normalizedRecipient,
+        tableQueried: sourceTable,
+        rowCount: rows.length,
+        scopedRowCount: scopedRows.length
+      });
+      counters = {
+        ...counters,
+        ...computeRecipientCountersFromPolicyRows({
+          rows: scopedRows,
+          recipient: primaryRecipient,
+          currentSubject: currentMetrics.subject,
+          currentMessageBytes: currentMetrics.totalBytes,
+          currentAttachmentBytes: currentMetrics.attachmentBytes
+        })
+      };
+      debugLog("UC29 counters computed", {
+        authenticatedUser,
+        recipient: primaryRecipient,
+        counters
+      });
+    }
+
+    context.counters = counters;
+  }
 
   return {
     tool: {
@@ -202,7 +444,8 @@ function buildOpaInput(req, toolName, args) {
       path: req.path,
       headers,
       body: req.body || null
-    }
+    },
+    context
   };
 }
 
@@ -245,7 +488,7 @@ async function callOpaDecision(req, toolName, args) {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPA_TIMEOUT_MS);
-  const input = buildOpaInput(req, toolName, args);
+  const input = await buildOpaInput(req, toolName, args);
   if (DEBUG) {
     debugLog("OPA request", { url: OPA_DECISION_URL, input: redactOpaInput(input) });
   }
@@ -349,14 +592,22 @@ app.post("/call-tool", async (req, res) => {
     const opaDecision = await callOpaDecision(req, name, args);
     const requesterIp = getRequesterIp(req);
     const targetUserId = deriveTarget(args);
+    const recipients = name === "send_email" ? collectRecipientAddresses(args) : [];
+    const normalizedPrimaryRecipient = recipients[0] || normalizeEmailAddress(targetUserId);
+    const sendMetrics =
+      name === "send_email" ? estimateMessageMetrics(args) : { totalBytes: 0, attachmentBytes: 0, subject: "" };
 
-    const opaRequest = buildOpaInput(req, name, args);
+    const opaRequest = await buildOpaInput(req, name, args);
     immudbLogger
       .recordPolicyDecision({
         authenticatedUser,
         requesterIp,
         toolName: name,
         targetUserId,
+        recipient: opaRequest?.context?.counters?.recipient || normalizedPrimaryRecipient,
+        subject: args?.subject || args?.message?.subject || sendMetrics.subject || "",
+        messageBytes: sendMetrics.totalBytes,
+        attachmentBytes: sendMetrics.attachmentBytes,
         allow: opaDecision.allow,
         reason: opaDecision.reason,
         opaRequest: redactOpaInput(opaRequest),
@@ -375,6 +626,10 @@ app.post("/call-tool", async (req, res) => {
           authenticatedUser,
           requesterIp,
           targetUserId,
+          recipient: normalizedPrimaryRecipient,
+          subject: sendMetrics.subject || "",
+          messageBytes: sendMetrics.totalBytes,
+          attachmentBytes: sendMetrics.attachmentBytes,
           action: name,
           status: auditStatus,
           durationMs: Date.now() - startedAt,
@@ -413,6 +668,10 @@ app.post("/call-tool", async (req, res) => {
         authenticatedUser,
         requesterIp,
         targetUserId,
+        recipient: normalizedPrimaryRecipient,
+        subject: sendMetrics.subject || "",
+        messageBytes: sendMetrics.totalBytes,
+        attachmentBytes: sendMetrics.attachmentBytes,
         action: name,
         status: auditStatus,
         durationMs: Date.now() - startedAt,
@@ -467,14 +726,28 @@ app.post("/call-tool", async (req, res) => {
   }
 });
 
-const server = app.listen(port, () => {
-  console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
-  if (DEBUG) {
-    console.log("[gmail-mcp-http][debug] Debug logging enabled");
-  }
-});
+let server = null;
+if (process.env.NODE_ENV !== "test") {
+  server = app.listen(port, () => {
+    console.log(`Gmail MCP HTTP wrapper running at http://localhost:${port}`);
+    if (DEBUG) {
+      console.log("[gmail-mcp-http][debug] Debug logging enabled");
+    }
+  });
 
-process.on("SIGINT", async () => {
-  await mcpClientManager.close();
-  server.close(() => process.exit(0));
-});
+  process.on("SIGINT", async () => {
+    await mcpClientManager.close();
+    server.close(() => process.exit(0));
+  });
+}
+
+export {
+  buildOpaInput,
+  collectRecipientAddresses,
+  computeRecipientCountersFromPolicyRows,
+  estimateMessageMetrics,
+  isExternalRecipient,
+  normalizeEmailAddress,
+  splitTargetRecipients,
+  filterRowsByAuthenticatedUser
+};
