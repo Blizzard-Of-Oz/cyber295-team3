@@ -6,7 +6,8 @@ process.env.NODE_ENV = 'test';
 const {
   buildOpaInput,
   collectRecipientAddresses,
-  isExternalRecipient
+  isExternalRecipient,
+  splitTargetRecipients
 } = await import('../src/server.js');
 
 function makeReq(user = 'employee@company.com') {
@@ -37,6 +38,10 @@ test('isExternalRecipient compares normalized domains', () => {
   assert.equal(isExternalRecipient('Peer@Company.com', 'employee@company.com'), false);
 });
 
+test('splitTargetRecipients normalizes comma-separated target_user_id values', () => {
+  assert.deepEqual(splitTargetRecipients('A@X.com, b@y.com '), ['a@x.com', 'b@y.com']);
+});
+
 test('first send to recipient has prior count 0', async () => {
   const input = await buildOpaInput(
     makeReq(),
@@ -58,7 +63,7 @@ test('second send to same recipient has prior count 1', async () => {
     {
       historyRowsOverride: [
         {
-          recipient: 'jimmy.m.yammine@gmail.com',
+          target_user_id: 'jimmy.m.yammine@gmail.com',
           subject: 'Part 1',
           message_bytes: 10,
           attachment_bytes: 0,
@@ -81,14 +86,14 @@ test('third send within same hour has prior count 2', async () => {
     {
       historyRowsOverride: [
         {
-          recipient: 'jimmy.m.yammine@gmail.com',
+          target_user_id: 'jimmy.m.yammine@gmail.com',
           subject: 'Part 1',
           message_bytes: 10,
           attachment_bytes: 0,
           ts: now
         },
         {
-          recipient: 'jimmy.m.yammine@gmail.com',
+          target_user_id: 'jimmy.m.yammine@gmail.com',
           subject: 'Part 2',
           message_bytes: 10,
           attachment_bytes: 0,
@@ -111,7 +116,7 @@ test('different recipient rows do not affect counters', async () => {
     {
       historyRowsOverride: [
         {
-          recipient: 'someoneelse@gmail.com',
+          target_user_id: 'someoneelse@gmail.com',
           subject: 'Other',
           message_bytes: 42,
           attachment_bytes: 0,

@@ -46,6 +46,16 @@ export class ImmuDBLogger {
     this.client = null;
     this.ready = null;
     this.sqlQueue = Promise.resolve();
+    this.debugEnabled = process.env.DEBUG === "true";
+  }
+
+  debugLog(message, meta) {
+    if (!this.debugEnabled) return;
+    if (meta !== undefined) {
+      console.log(`[immudb-logger][debug] ${message}`, meta);
+    } else {
+      console.log(`[immudb-logger][debug] ${message}`);
+    }
   }
 
   async init() {
@@ -303,22 +313,28 @@ export class ImmuDBLogger {
   async fetchRecentAllowedPolicyDecisions({
     authenticatedUser,
     toolName,
-    recipient,
     lookbackHours = 24
   } = {}) {
     if (!this.enabled || !this.useSql) return [];
-    if (!authenticatedUser || !toolName || !recipient) return [];
+    if (!authenticatedUser || !toolName) return [];
 
     await this.init();
     const esc = (str) => String(str ?? "").replace(/'/g, "''");
     const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000).toISOString();
     const sql =
       "SELECT authenticated_user, tool_name, target_user_id, recipient, subject, message_bytes, attachment_bytes, allow, ts FROM mcp_policy_decisions WHERE " +
-      `authenticated_user='${esc(authenticatedUser)}' AND tool_name='${esc(toolName)}' AND allow='true' AND recipient='${esc(recipient)}' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
+      `authenticated_user='${esc(authenticatedUser)}' AND tool_name='${esc(toolName)}' AND allow='true' AND ts >= '${esc(cutoff)}' ORDER BY id DESC LIMIT 500`;
+    this.debugLog("UC29 SQL lookup params", {
+      authenticatedUser,
+      toolName,
+      lookbackHours,
+      cutoff
+    });
 
     const runQuery = async () => {
       const response = await this.client.SQLQuery({ sql });
       const rows = Array.isArray(response?.rows) ? response.rows : [];
+      this.debugLog("UC29 SQL raw rows returned", { rowCount: rows.length });
       return rows.map((row) => {
         const asNum = (value) => {
           const raw = value?.prop ?? value;
@@ -340,7 +356,16 @@ export class ImmuDBLogger {
     };
 
     try {
-      return await runQuery();
+      const parsedRows = await runQuery();
+      this.debugLog("UC29 SQL parsed rows", {
+        rows: parsedRows.map((row) => ({
+          target_user_id: row.target_user_id,
+          tool_name: row.tool_name,
+          allow: row.allow,
+          ts: row.ts
+        }))
+      });
+      return parsedRows;
     } catch (error) {
       if (error.code === 7 && error.details?.includes("token has expired")) {
         await this.reAuthenticate();

@@ -188,6 +188,17 @@ function normalizeEmailAddress(value) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
+function splitTargetRecipients(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeEmailAddress(entry)).filter(Boolean);
+  }
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((entry) => normalizeEmailAddress(entry))
+    .filter(Boolean);
+}
+
 function collectRecipientAddresses(args = {}) {
   const raw = [];
   const collect = (value) => {
@@ -288,8 +299,18 @@ function computeRecipientCountersFromPolicyRows({
   for (const row of rows || []) {
     const tsMs = Date.parse(row?.ts || "");
     if (!Number.isFinite(tsMs) || tsMs < dayAgo) continue;
-    const rowRecipient = normalizeEmailAddress(row?.recipient || row?.target_user_id);
-    if (rowRecipient !== recipientNorm) continue;
+    const rowRecipients = [
+      ...splitTargetRecipients(row?.target_user_id),
+      ...splitTargetRecipients(row?.recipient)
+    ];
+    const matched = rowRecipients.includes(recipientNorm);
+    debugLog("UC29 row match check", {
+      target_user_id: row?.target_user_id || null,
+      rowRecipients,
+      normalizedRecipient: recipientNorm,
+      matched
+    });
+    if (!matched) continue;
     const messageBytes = Number.isFinite(Number(row?.message_bytes))
       ? Math.max(0, Number(row?.message_bytes))
       : 0;
@@ -350,7 +371,6 @@ async function buildOpaInput(req, toolName, args, options = {}) {
           ? await immudbLogger.fetchRecentAllowedPolicyDecisions({
               authenticatedUser,
               toolName: "send_email",
-              recipient: primaryRecipient,
               lookbackHours: 24
             })
           : [];
@@ -551,7 +571,7 @@ app.post("/call-tool", async (req, res) => {
         requesterIp,
         toolName: name,
         targetUserId,
-        recipient: opaRequest?.context?.counters?.recipient || null,
+        recipient: opaRequest?.context?.counters?.recipient || normalizeEmailAddress(targetUserId),
         subject: args?.subject || args?.message?.subject || "",
         messageBytes: sendMetrics.totalBytes,
         attachmentBytes: sendMetrics.attachmentBytes,
@@ -686,5 +706,6 @@ export {
   computeRecipientCountersFromPolicyRows,
   estimateMessageMetrics,
   isExternalRecipient,
-  normalizeEmailAddress
+  normalizeEmailAddress,
+  splitTargetRecipients
 };
